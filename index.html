@@ -38,6 +38,10 @@
                     Playlist Length (min): 
                     <input type="number" id="playlist-duration" value="30" min="5" max="180">
                 </label>
+                <label>
+                    Songs to Analyze: 
+                    <input type="number" id="song-limit" value="100" min="10" max="1000">
+                </label>
             </div>
 
             <button id="analyze-button" class="btn-primary">
@@ -57,7 +61,7 @@
                 <button id="create-playlist" class="btn-success">
                     Create Playlist in Spotify
                 </button>
-                <button id="play-playlist" class="btn-primary">
+                <button id="play-playlist" class="btn-primary" style="display: none;">
                     Play Custom Playlist
                 </button>
             </div>
@@ -117,15 +121,23 @@
                     </div>
                     <div class="metronome-controls">
                         <button id="metronome-toggle" class="control-btn">Start Metronome</button>
+                        <button id="auto-sync-toggle" class="control-btn auto-sync-btn">Enable Auto-Sync</button>
                         <label>
                             Volume: <input type="range" id="metronome-volume" min="0" max="100" value="50">
                         </label>
+                    </div>
+                    <div id="sync-status" class="sync-status hidden">
+                        <div class="sync-indicator">
+                            <div id="sync-progress" class="sync-progress"></div>
+                            <div id="sync-text">Preparing audio capture...</div>
+                        </div>
                     </div>
                 </div>
             </div>
         </div>
     </div>
 
+    <script src="https://sdk.scdn.co/spotify-player.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

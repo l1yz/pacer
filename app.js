@@ -5,10 +5,13 @@ const CLIENT_ID = '593a5515c27d4db4873b52036524e37c';
 const REDIRECT_URI = 'https://l1yz.github.io/pacer';//'http://localhost:3000';
 const SCOPES = [
     'user-read-private',
-    'user-library-read',  // ADDED: For Liked Songs access
+    'user-library-read',  // For Liked Songs access
     'playlist-read-private',
     'playlist-modify-public',
-    'playlist-modify-private'
+    'playlist-modify-private',
+    'streaming',          // For Web Playback SDK
+    'user-read-playback-state',
+    'user-modify-playback-state'
 ].join(' ');
 
 // ============= Auth & Token Management =============
@@ -314,6 +317,13 @@ async function loadUserInfo() {
     try {
         const user = await spotifyAPI('v1/me');
         document.getElementById('user-name').textContent = `Hello, ${user.display_name}!`;
+        
+        // Initialize Spotify Player after authentication
+        if (typeof Spotify !== 'undefined') {
+            await initializeSpotifyPlayer();
+        } else {
+            addDebugLog('Spotify Web Playback SDK not loaded yet. Will initialize when ready.');
+        }
     } catch (error) {
         console.error('Failed to load user info:', error);
     }
@@ -468,9 +478,9 @@ async function getTracksWithBPM(tracks, targetBPM, tolerance) {
   let noAudioFeatures = 0;
   let successCount = 0;
 
-  // LIMIT TO FIRST 30 TRACKS FOR DEBUGGING
-  const DEBUG_LIMIT = 500;
-  const tracksToProcess = tracks.slice(0, DEBUG_LIMIT);
+  // Use song limit from input for faster testing
+  const songLimit = parseInt(document.getElementById('song-limit').value) || 100;
+  const tracksToProcess = tracks.slice(0, songLimit);
   
   addDebugLog('--- Analyzing BPM using ReccoBeats batch API ---');
   addDebugLog(`Processing first ${tracksToProcess.length} tracks out of ${tracks.length} total...`);
@@ -613,8 +623,8 @@ async function getTracksWithBPM(tracks, targetBPM, tolerance) {
   addDebugLog(`- Tracks without BPM data: ${noAudioFeatures}`);
   addDebugLog(`- Success rate: ${tracksToProcess.length > 0 ? (successCount/tracksToProcess.length*100).toFixed(1) : 0}%`);
 
-  // Add remaining tracks as null tempo
-  const remainingTracks = tracks.slice(DEBUG_LIMIT);
+  // Add remaining tracks as null tempo if user wants to see full list
+  const remainingTracks = tracks.slice(songLimit);
   remainingTracks.forEach(track => {
     tracksWithBPM.push({ ...track, tempo: null });
   });
@@ -735,33 +745,124 @@ document.getElementById('create-playlist').addEventListener('click', async () =>
     }
 });
 
-// ============= Audio Player & Metronome =============
+// ============= Spotify Web Playback SDK & Audio Player =============
+let spotifyPlayer = null;
+let deviceId = null;
+
+// Initialize Spotify Web Playback SDK
+window.onSpotifyWebPlaybackSDKReady = () => {
+    initializeSpotifyPlayer();
+};
+
+async function initializeSpotifyPlayer() {
+    if (!accessToken) {
+        addDebugLog('No access token available for Spotify Player');
+        return;
+    }
+    
+    try {
+        spotifyPlayer = new Spotify.Player({
+            name: 'BPM Pacer Player',
+            getOAuthToken: cb => { cb(accessToken); },
+            volume: 0.7
+        });
+
+        // Error handling
+        spotifyPlayer.addListener('initialization_error', ({ message }) => {
+            addDebugLog(`Spotify Player initialization error: ${message}`);
+        });
+
+        spotifyPlayer.addListener('authentication_error', ({ message }) => {
+            addDebugLog(`Spotify Player authentication error: ${message}`);
+        });
+
+        spotifyPlayer.addListener('account_error', ({ message }) => {
+            addDebugLog(`Spotify Player account error: ${message}`);
+        });
+
+        // Ready
+        spotifyPlayer.addListener('ready', ({ device_id }) => {
+            addDebugLog(`Spotify Player ready! Device ID: ${device_id}`);
+            deviceId = device_id;
+            document.getElementById('play-playlist').style.display = 'inline-block';
+        });
+
+        // Not ready
+        spotifyPlayer.addListener('not_ready', ({ device_id }) => {
+            addDebugLog(`Spotify Player device ${device_id} has gone offline`);
+            deviceId = null;
+        });
+
+        // Player state changes
+        spotifyPlayer.addListener('player_state_changed', (state) => {
+            if (!state) return;
+            
+            audioPlayer.handleSpotifyStateChange(state);
+        });
+
+        // Connect to the player
+        const connected = await spotifyPlayer.connect();
+        if (connected) {
+            addDebugLog('Spotify Player connected successfully');
+        } else {
+            addDebugLog('Failed to connect to Spotify Player');
+        }
+        
+    } catch (error) {
+        addDebugLog(`Error initializing Spotify Player: ${error.message}`);
+    }
+}
+
 class AudioPlayer {
     constructor() {
         this.playlist = [];
         this.currentIndex = 0;
         this.isPlaying = false;
-        this.audioContext = null;
-        this.audioBuffer = null;
-        this.sourceNode = null;
-        this.gainNode = null;
-        this.currentTime = 0;
+        this.currentTrack = null;
+        this.position = 0;
         this.duration = 0;
         this.playbackRate = 1.0;
-        this.startTime = 0;
-        this.pauseTime = 0;
         
-        this.initializeAudioContext();
         this.bindEvents();
     }
     
-    async initializeAudioContext() {
-        try {
-            this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            this.gainNode = this.audioContext.createGain();
-            this.gainNode.connect(this.audioContext.destination);
-        } catch (error) {
-            console.error('Failed to initialize audio context:', error);
+    handleSpotifyStateChange(state) {
+        if (!state || !state.track_window.current_track) return;
+        
+        const track = state.track_window.current_track;
+        const wasPlaying = this.isPlaying;
+        this.isPlaying = !state.paused;
+        this.position = state.position;
+        this.duration = state.duration;
+        
+        // Check if track changed
+        const trackChanged = !this.currentTrack || this.currentTrack.id !== track.id;
+        
+        if (trackChanged) {
+            // Find matching track in playlist
+            const playlistTrack = this.playlist.find(t => t.id === track.id);
+            if (playlistTrack) {
+                this.currentTrack = playlistTrack;
+                this.updatePlayerDisplay();
+                
+                // Auto-calibrate if auto-sync is enabled and track is playing
+                if (beatDetector.audioStream && this.isPlaying && !beatDetector.isListening) {
+                    setTimeout(() => {
+                        addDebugLog(`Track changed to: ${track.name} - starting auto-calibration`);
+                        beatDetector.startCalibration(track.id);
+                    }, 2000); // Wait 2 seconds for track to fully start
+                }
+            }
+        }
+        
+        // Update UI
+        this.updateProgressBar();
+        const button = document.getElementById('play-pause');
+        button.textContent = this.isPlaying ? '⏸' : '▶';
+        
+        // Update metronome based on current track
+        if (this.currentTrack) {
+            this.updateTempoMode();
         }
     }
     
@@ -796,6 +897,11 @@ class AudioPlayer {
             return;
         }
         
+        if (!deviceId) {
+            alert('Spotify Player not ready! Please ensure you have Spotify Premium and try refreshing the page.');
+            return;
+        }
+        
         // Create limited playlist based on duration setting
         const maxDurationMinutes = parseInt(document.getElementById('playlist-duration').value);
         this.playlist = createLimitedPlaylist(window.matchingTracks, maxDurationMinutes);
@@ -809,32 +915,39 @@ class AudioPlayer {
         document.getElementById('player-section').classList.remove('hidden');
         document.getElementById('total-tracks').textContent = this.playlist.length;
         
-        // Note: Since we can't actually stream Spotify tracks directly due to licensing,
-        // we'll create a demo player that shows the functionality
-        this.updatePlayerDisplay();
-        this.simulateTrackPlayback();
-        
-        addDebugLog(`Started custom playlist: ${this.playlist.length} tracks`);
+        try {
+            // Create track URIs for Spotify
+            const trackUris = this.playlist.map(track => `spotify:track:${track.id}`);
+            
+            // Start playback on our device
+            await this.startPlayback(trackUris, 0);
+            
+            this.updatePlayerDisplay();
+            addDebugLog(`Started Spotify playlist: ${this.playlist.length} tracks`);
+            
+        } catch (error) {
+            addDebugLog(`Error starting playlist: ${error.message}`);
+            alert('Failed to start playlist. Please try again.');
+        }
     }
     
-    simulateTrackPlayback() {
-        // This simulates track playback since we can't stream actual Spotify tracks
-        // In a real implementation, you'd need the Spotify Web Playback SDK or preview URLs
-        const currentTrack = this.playlist[this.currentIndex];
-        this.duration = (currentTrack.duration_ms || 180000) / 1000; // Convert to seconds
-        this.currentTime = 0;
-        
-        // Simulate progress
-        this.progressInterval = setInterval(() => {
-            if (this.isPlaying) {
-                this.currentTime += 0.1;
-                this.updateProgressBar();
-                
-                if (this.currentTime >= this.duration) {
-                    this.nextTrack();
+    async startPlayback(trackUris, offset = 0) {
+        try {
+            await spotifyAPI(
+                `v1/me/player/play?device_id=${deviceId}`,
+                'PUT',
+                {
+                    uris: trackUris,
+                    offset: { position: offset }
                 }
-            }
-        }, 100);
+            );
+            
+            this.currentIndex = offset;
+            this.currentTrack = this.playlist[offset];
+            
+        } catch (error) {
+            throw new Error(`Failed to start playback: ${error.message}`);
+        }
     }
     
     updatePlayerDisplay() {
@@ -856,50 +969,62 @@ class AudioPlayer {
     }
     
     updateProgressBar() {
-        const percentage = (this.currentTime / this.duration) * 100;
+        if (!this.duration) return;
+        
+        const percentage = (this.position / this.duration) * 100;
         document.getElementById('track-progress-fill').style.width = `${percentage}%`;
         document.getElementById('track-progress-handle').style.left = `${percentage}%`;
         
-        document.getElementById('current-time').textContent = formatDuration(this.currentTime * 1000);
-        document.getElementById('total-time').textContent = formatDuration(this.duration * 1000);
+        document.getElementById('current-time').textContent = formatDuration(this.position);
+        document.getElementById('total-time').textContent = formatDuration(this.duration);
     }
     
-    togglePlayPause() {
-        if (this.playlist.length === 0) {
-            alert('No playlist loaded!');
+    async togglePlayPause() {
+        if (!spotifyPlayer) {
+            alert('Spotify Player not ready!');
             return;
         }
         
-        this.isPlaying = !this.isPlaying;
-        const button = document.getElementById('play-pause');
-        button.textContent = this.isPlaying ? '⏸' : '▶';
+        try {
+            await spotifyPlayer.togglePlay();
+            
+            if (this.isPlaying) {
+                metronome.start();
+            } else {
+                metronome.stop();
+            }
+        } catch (error) {
+            addDebugLog(`Error toggling playback: ${error.message}`);
+        }
+    }
+    
+    async previousTrack() {
+        if (!spotifyPlayer) return;
         
-        if (this.isPlaying) {
-            metronome.start();
-        } else {
-            metronome.stop();
+        try {
+            await spotifyPlayer.previousTrack();
+            if (this.currentIndex > 0) {
+                this.currentIndex--;
+                this.currentTrack = this.playlist[this.currentIndex];
+                this.updatePlayerDisplay();
+            }
+        } catch (error) {
+            addDebugLog(`Error going to previous track: ${error.message}`);
         }
     }
     
-    previousTrack() {
-        if (this.currentIndex > 0) {
-            this.currentIndex--;
-            this.updatePlayerDisplay();
-            this.simulateTrackPlayback();
-        }
-    }
-    
-    nextTrack() {
-        if (this.currentIndex < this.playlist.length - 1) {
-            this.currentIndex++;
-            this.updatePlayerDisplay();
-            this.simulateTrackPlayback();
-        } else {
-            // End of playlist
-            this.isPlaying = false;
-            document.getElementById('play-pause').textContent = '▶';
-            metronome.stop();
-            clearInterval(this.progressInterval);
+    async nextTrack() {
+        if (!spotifyPlayer) return;
+        
+        try {
+            await spotifyPlayer.nextTrack();
+            if (this.currentIndex < this.playlist.length - 1) {
+                this.currentIndex++;
+                this.currentTrack = this.playlist[this.currentIndex];
+                this.updatePlayerDisplay();
+            }
+        } catch (error) {
+            addDebugLog(`Error going to next track: ${error.message}`);
         }
     }
     
@@ -915,14 +1040,228 @@ class AudioPlayer {
             const originalBPM = currentTrack.tempo;
             this.playbackRate = targetBPM / originalBPM;
             
-            // Note: In a real implementation, you'd apply this to the audio source
-            addDebugLog(`Song tempo adjusted: ${originalBPM.toFixed(1)} → ${targetBPM} BPM (rate: ${this.playbackRate.toFixed(2)}x)`);
+            // NOTE: Spotify Web Playback SDK doesn't support tempo/pitch adjustment
+            // This shows the calculated playback rate that would be needed
+            addDebugLog(`Tempo calculation: ${originalBPM.toFixed(1)} → ${targetBPM} BPM (would need ${this.playbackRate.toFixed(2)}x rate)`);
+            addDebugLog(`Note: Spotify API doesn't support tempo adjustment. Use metronome for pacing.`);
             
             metronome.setBPM(targetBPM);
         } else {
-            // Option 2: Adjust metronome to song BPM
+            // Option 2: Adjust metronome to song BPM (recommended)
             this.playbackRate = 1.0;
             metronome.setBPM(Math.round(currentTrack.tempo));
+            addDebugLog(`Metronome set to match song: ${Math.round(currentTrack.tempo)} BPM`);
+        }
+    }
+}
+
+// ============= Audio Beat Detection System =============
+class BeatDetector {
+    constructor() {
+        this.audioStream = null;
+        this.audioContext = null;
+        this.analyser = null;
+        this.isListening = false;
+        this.calibrationStartTime = null;
+        this.detectedBeats = [];
+        this.currentTrackId = null;
+        this.beatOffset = null; // Phase offset for current track
+        
+        // Beat detection parameters
+        this.fftSize = 2048;
+        this.bassFreqRange = { min: 0, max: 8 }; // Indices for ~60-120Hz
+        this.beatThreshold = 0.3;
+        this.minBeatInterval = 300; // Min 300ms between beats (200 BPM max)
+        this.lastBeatTime = 0;
+        
+        // Calibration settings
+        this.calibrationDuration = 10000; // 10 seconds
+        this.minBeatsRequired = 8; // Need at least 8 beats for good calibration
+    }
+    
+    async requestAudioAccess() {
+        try {
+            // Request system audio capture via screen sharing
+            this.audioStream = await navigator.mediaDevices.getDisplayMedia({
+                video: false,
+                audio: {
+                    echoCancellation: false,
+                    noiseSuppression: false,
+                    autoGainControl: false,
+                    sampleRate: 44100
+                }
+            });
+            
+            // Set up audio analysis
+            this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const source = this.audioContext.createMediaStreamSource(this.audioStream);
+            this.analyser = this.audioContext.createAnalyser();
+            
+            this.analyser.fftSize = this.fftSize;
+            this.analyser.smoothingTimeConstant = 0.3;
+            source.connect(this.analyser);
+            
+            addDebugLog('Audio capture initialized successfully');
+            return true;
+            
+        } catch (error) {
+            addDebugLog(`Audio capture failed: ${error.message}`);
+            return false;
+        }
+    }
+    
+    startCalibration(trackId) {
+        if (!this.analyser || this.isListening) return false;
+        
+        this.currentTrackId = trackId;
+        this.detectedBeats = [];
+        this.calibrationStartTime = Date.now();
+        this.isListening = true;
+        this.beatOffset = null;
+        
+        // Update UI
+        document.getElementById('sync-status').classList.remove('hidden');
+        document.getElementById('sync-progress').classList.add('listening');
+        document.getElementById('sync-text').textContent = 'Listening for beats...';
+        
+        addDebugLog(`Starting beat calibration for track: ${trackId}`);
+        this.calibrationLoop();
+        
+        // Auto-stop after calibration duration
+        setTimeout(() => {
+            this.stopCalibration();
+        }, this.calibrationDuration);
+        
+        return true;
+    }
+    
+    calibrationLoop() {
+        if (!this.isListening) return;
+        
+        const currentTime = Date.now();
+        const elapsed = currentTime - this.calibrationStartTime;
+        
+        // Update progress
+        const progress = Math.min(elapsed / this.calibrationDuration * 100, 100);
+        document.querySelector('#sync-progress').style.setProperty('--progress', `${progress}%`);
+        
+        // Analyze audio for beats
+        const beatDetected = this.detectBeat();
+        if (beatDetected) {
+            const spotifyPosition = audioPlayer.position; // Current Spotify position
+            this.detectedBeats.push({
+                timestamp: currentTime,
+                spotifyPosition: spotifyPosition
+            });
+            
+            // Visual feedback for detected beat
+            this.flashBeatDetection();
+            
+            addDebugLog(`Beat detected at Spotify position: ${spotifyPosition}ms`);
+        }
+        
+        // Continue loop
+        if (this.isListening) {
+            requestAnimationFrame(() => this.calibrationLoop());
+        }
+    }
+    
+    detectBeat() {
+        const frequencyData = new Uint8Array(this.analyser.frequencyBinCount);
+        this.analyser.getByteFrequencyData(frequencyData);
+        
+        // Calculate bass energy (kick drum range ~60-120Hz)
+        let bassEnergy = 0;
+        for (let i = this.bassFreqRange.min; i <= this.bassFreqRange.max; i++) {
+            bassEnergy += frequencyData[i];
+        }
+        bassEnergy /= (this.bassFreqRange.max - this.bassFreqRange.min + 1);
+        bassEnergy /= 255; // Normalize to 0-1
+        
+        // Simple beat detection: look for sudden increases in bass energy
+        const currentTime = Date.now();
+        if (bassEnergy > this.beatThreshold && 
+            currentTime - this.lastBeatTime > this.minBeatInterval) {
+            
+            this.lastBeatTime = currentTime;
+            return true;
+        }
+        
+        return false;
+    }
+    
+    stopCalibration() {
+        this.isListening = false;
+        document.getElementById('sync-progress').classList.remove('listening');
+        
+        if (this.detectedBeats.length < this.minBeatsRequired) {
+            document.getElementById('sync-text').textContent = 
+                `Not enough beats detected (${this.detectedBeats.length}/${this.minBeatsRequired}). Try increasing volume.`;
+            
+            setTimeout(() => {
+                document.getElementById('sync-status').classList.add('hidden');
+            }, 3000);
+            
+            addDebugLog(`Calibration failed: only ${this.detectedBeats.length} beats detected`);
+            return false;
+        }
+        
+        // Calculate beat offset
+        this.calculateBeatOffset();
+        
+        document.getElementById('sync-text').textContent = 
+            `✓ Synced! (${this.detectedBeats.length} beats analyzed)`;
+        
+        setTimeout(() => {
+            document.getElementById('sync-status').classList.add('hidden');
+        }, 2000);
+        
+        addDebugLog(`Calibration successful: ${this.detectedBeats.length} beats, offset: ${this.beatOffset}ms`);
+        return true;
+    }
+    
+    calculateBeatOffset() {
+        if (this.detectedBeats.length === 0) return;
+        
+        const currentTrack = audioPlayer.playlist[audioPlayer.currentIndex];
+        const bpm = currentTrack.tempo;
+        const beatInterval = 60000 / bpm; // milliseconds per beat
+        
+        // Find the most consistent beat phase
+        const phases = this.detectedBeats.map(beat => 
+            beat.spotifyPosition % beatInterval
+        );
+        
+        // Use median phase to avoid outliers
+        phases.sort((a, b) => a - b);
+        const medianPhase = phases[Math.floor(phases.length / 2)];
+        
+        this.beatOffset = medianPhase;
+        
+        // Apply smooth transition to metronome
+        metronome.smoothTransitionToPhase(this.beatOffset, bpm);
+    }
+    
+    flashBeatDetection() {
+        const indicator = document.getElementById('metronome-visual');
+        indicator.style.background = '#ff6b35';
+        indicator.style.transform = 'scale(1.3)';
+        
+        setTimeout(() => {
+            indicator.style.background = '';
+            indicator.style.transform = '';
+        }, 100);
+    }
+    
+    cleanup() {
+        this.isListening = false;
+        if (this.audioStream) {
+            this.audioStream.getTracks().forEach(track => track.stop());
+            this.audioStream = null;
+        }
+        if (this.audioContext) {
+            this.audioContext.close();
+            this.audioContext = null;
         }
     }
 }
@@ -935,6 +1274,9 @@ class Metronome {
         this.intervalId = null;
         this.audioContext = null;
         this.volume = 0.5;
+        this.phase = 0; // Current phase offset for smooth transitions
+        this.targetPhase = 0; // Target phase for smooth transitions
+        this.isTransitioning = false;
         
         this.bindEvents();
         this.initializeAudio();
@@ -956,6 +1298,42 @@ class Metronome {
         document.getElementById('metronome-volume').addEventListener('input', (e) => {
             this.volume = e.target.value / 100;
         });
+        
+        document.getElementById('auto-sync-toggle').addEventListener('click', () => {
+            this.toggleAutoSync();
+        });
+    }
+    
+    async toggleAutoSync() {
+        const button = document.getElementById('auto-sync-toggle');
+        
+        if (!beatDetector.audioStream) {
+            // Request audio access
+            button.textContent = 'Requesting Access...';
+            const success = await beatDetector.requestAudioAccess();
+            
+            if (success) {
+                button.textContent = 'Disable Auto-Sync';
+                button.classList.add('active');
+                addDebugLog('Auto-sync enabled - audio capture ready');
+                
+                // Auto-calibrate if currently playing
+                if (audioPlayer.isPlaying && audioPlayer.currentTrack) {
+                    setTimeout(() => {
+                        beatDetector.startCalibration(audioPlayer.currentTrack.id);
+                    }, 1000);
+                }
+            } else {
+                button.textContent = 'Enable Auto-Sync';
+                alert('Audio access denied. Please allow system audio capture to use auto-sync.');
+            }
+        } else {
+            // Disable auto-sync
+            beatDetector.cleanup();
+            button.textContent = 'Enable Auto-Sync';
+            button.classList.remove('active');
+            addDebugLog('Auto-sync disabled');
+        }
     }
     
     setBPM(bpm) {
@@ -974,12 +1352,57 @@ class Metronome {
         this.isRunning = true;
         document.getElementById('metronome-toggle').textContent = 'Stop Metronome';
         
-        const interval = 60000 / this.bpm; // milliseconds per beat
+        this.scheduleNextBeat();
+    }
+    
+    scheduleNextBeat() {
+        if (!this.isRunning) return;
         
-        this.intervalId = setInterval(() => {
+        const interval = 60000 / this.bpm; // milliseconds per beat
+        let nextBeatDelay = interval;
+        
+        // Apply phase offset for sync
+        if (this.phase !== 0) {
+            nextBeatDelay = interval - this.phase;
+            this.phase = 0; // Reset after first adjusted beat
+        }
+        
+        this.intervalId = setTimeout(() => {
             this.playBeat();
             this.visualBeat();
-        }, interval);
+            
+            // Schedule next beat with regular interval
+            if (this.isRunning) {
+                this.intervalId = setInterval(() => {
+                    this.playBeat();
+                    this.visualBeat();
+                }, interval);
+            }
+        }, nextBeatDelay);
+    }
+    
+    smoothTransitionToPhase(beatOffset, bpm) {
+        if (!this.isRunning) {
+            this.phase = beatOffset;
+            return;
+        }
+        
+        // Calculate smooth transition
+        const interval = 60000 / bpm;
+        const currentPhase = Date.now() % interval;
+        const phaseDifference = (beatOffset - currentPhase + interval) % interval;
+        
+        // Avoid jarring transitions - only adjust if difference is significant
+        if (Math.abs(phaseDifference) > 50 && Math.abs(phaseDifference) < interval - 50) {
+            addDebugLog(`Smoothly adjusting metronome phase by ${phaseDifference.toFixed(1)}ms`);
+            
+            // Restart with new phase
+            this.stop();
+            this.phase = phaseDifference;
+            this.start();
+        } else {
+            addDebugLog('Phase difference too small for smooth transition - keeping current timing');
+        }
     }
     
     stop() {
@@ -1034,6 +1457,7 @@ class Metronome {
 }
 
 // Initialize components
+const beatDetector = new BeatDetector();
 const audioPlayer = new AudioPlayer();
 const metronome = new Metronome();
 
