@@ -482,7 +482,7 @@ async function getTracksWithBPM(tracks, targetBPM, tolerance) {
   const songLimit = parseInt(document.getElementById('song-limit').value) || 100;
   const tracksToProcess = tracks.slice(0, songLimit);
   
-  addDebugLog('--- Analyzing BPM using ReccoBeats batch API ---');
+  addDebugLog('--- Analyzing BPM using ReccoBeats two-step API ---');
   addDebugLog(`Processing first ${tracksToProcess.length} tracks out of ${tracks.length} total...`);
 
   // Use exact headers from official documentation
@@ -495,7 +495,9 @@ async function getTracksWithBPM(tracks, targetBPM, tolerance) {
     redirect: "follow"
   };
 
-  // Process in batches (let's try smaller batches first)
+  // STEP 1: Get ReccoBeats track IDs from Spotify IDs (batch)
+  addDebugLog('=== STEP 1: Getting ReccoBeats track IDs ===');
+  const trackIdMapping = new Map(); // spotifyId -> reccoBeatId
   const BATCH_SIZE = 40;
   
   for (let i = 0; i < tracksToProcess.length; i += BATCH_SIZE) {
