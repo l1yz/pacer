@@ -644,6 +644,7 @@ function showResults(tracks) {
             <div>
                 <div class="track-name">${track.name}</div>
                 <div class="track-artist">${track.artists.map(a => a.name).join(', ')}</div>
+                <div class="track-duration">${formatDuration(track.duration_ms || 180000)}</div>
             </div>
             <span class="track-bpm">${Math.round(track.tempo)} BPM</span>
         `;
@@ -654,6 +655,41 @@ function showResults(tracks) {
     
     // Store tracks for playlist creation
     window.matchingTracks = tracks;
+}
+
+// Create duration-limited playlist
+function createLimitedPlaylist(tracks, maxDurationMinutes) {
+    const maxDurationMs = maxDurationMinutes * 60 * 1000;
+    let currentDuration = 0;
+    const selectedTracks = [];
+    
+    // Sort tracks by closeness to target BPM for best matches first
+    const targetBPM = parseInt(document.getElementById('target-bpm').value);
+    const sortedTracks = [...tracks].sort((a, b) => 
+        Math.abs(a.tempo - targetBPM) - Math.abs(b.tempo - targetBPM)
+    );
+    
+    for (const track of sortedTracks) {
+        const trackDuration = track.duration_ms || 180000; // Default 3 minutes if no duration
+        
+        if (currentDuration + trackDuration <= maxDurationMs) {
+            selectedTracks.push(track);
+            currentDuration += trackDuration;
+        }
+        
+        // Break if we're close to the limit
+        if (currentDuration >= maxDurationMs * 0.95) break;
+    }
+    
+    addDebugLog(`Playlist created: ${selectedTracks.length} tracks, ${formatDuration(currentDuration)} duration`);
+    return selectedTracks;
+}
+
+// Format duration from milliseconds to MM:SS
+function formatDuration(durationMs) {
+    const minutes = Math.floor(durationMs / 60000);
+    const seconds = Math.floor((durationMs % 60000) / 1000);
+    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
 }
 
 // Create playlist
@@ -698,6 +734,308 @@ document.getElementById('create-playlist').addEventListener('click', async () =>
         alert('Failed to create playlist. Please try again.');
     }
 });
+
+// ============= Audio Player & Metronome =============
+class AudioPlayer {
+    constructor() {
+        this.playlist = [];
+        this.currentIndex = 0;
+        this.isPlaying = false;
+        this.audioContext = null;
+        this.audioBuffer = null;
+        this.sourceNode = null;
+        this.gainNode = null;
+        this.currentTime = 0;
+        this.duration = 0;
+        this.playbackRate = 1.0;
+        this.startTime = 0;
+        this.pauseTime = 0;
+        
+        this.initializeAudioContext();
+        this.bindEvents();
+    }
+    
+    async initializeAudioContext() {
+        try {
+            this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            this.gainNode = this.audioContext.createGain();
+            this.gainNode.connect(this.audioContext.destination);
+        } catch (error) {
+            console.error('Failed to initialize audio context:', error);
+        }
+    }
+    
+    bindEvents() {
+        document.getElementById('play-playlist').addEventListener('click', () => {
+            this.startCustomPlaylist();
+        });
+        
+        document.getElementById('play-pause').addEventListener('click', () => {
+            this.togglePlayPause();
+        });
+        
+        document.getElementById('prev-track').addEventListener('click', () => {
+            this.previousTrack();
+        });
+        
+        document.getElementById('next-track').addEventListener('click', () => {
+            this.nextTrack();
+        });
+        
+        // Tempo mode change
+        document.querySelectorAll('input[name="tempo-mode"]').forEach(radio => {
+            radio.addEventListener('change', () => {
+                this.updateTempoMode();
+            });
+        });
+    }
+    
+    async startCustomPlaylist() {
+        if (!window.matchingTracks || window.matchingTracks.length === 0) {
+            alert('No matching tracks found! Please analyze your music first.');
+            return;
+        }
+        
+        // Create limited playlist based on duration setting
+        const maxDurationMinutes = parseInt(document.getElementById('playlist-duration').value);
+        this.playlist = createLimitedPlaylist(window.matchingTracks, maxDurationMinutes);
+        
+        if (this.playlist.length === 0) {
+            alert('No tracks fit within the specified duration!');
+            return;
+        }
+        
+        this.currentIndex = 0;
+        document.getElementById('player-section').classList.remove('hidden');
+        document.getElementById('total-tracks').textContent = this.playlist.length;
+        
+        // Note: Since we can't actually stream Spotify tracks directly due to licensing,
+        // we'll create a demo player that shows the functionality
+        this.updatePlayerDisplay();
+        this.simulateTrackPlayback();
+        
+        addDebugLog(`Started custom playlist: ${this.playlist.length} tracks`);
+    }
+    
+    simulateTrackPlayback() {
+        // This simulates track playback since we can't stream actual Spotify tracks
+        // In a real implementation, you'd need the Spotify Web Playback SDK or preview URLs
+        const currentTrack = this.playlist[this.currentIndex];
+        this.duration = (currentTrack.duration_ms || 180000) / 1000; // Convert to seconds
+        this.currentTime = 0;
+        
+        // Simulate progress
+        this.progressInterval = setInterval(() => {
+            if (this.isPlaying) {
+                this.currentTime += 0.1;
+                this.updateProgressBar();
+                
+                if (this.currentTime >= this.duration) {
+                    this.nextTrack();
+                }
+            }
+        }, 100);
+    }
+    
+    updatePlayerDisplay() {
+        const track = this.playlist[this.currentIndex];
+        if (!track) return;
+        
+        document.getElementById('current-track-name').textContent = track.name;
+        document.getElementById('current-track-artist').textContent = track.artists.map(a => a.name).join(', ');
+        document.getElementById('current-track-bpm').textContent = `${Math.round(track.tempo)} BPM`;
+        document.getElementById('current-track-index').textContent = this.currentIndex + 1;
+        
+        // Update remaining time
+        const remainingTracks = this.playlist.slice(this.currentIndex + 1);
+        const remainingMs = remainingTracks.reduce((total, track) => total + (track.duration_ms || 180000), 0);
+        document.getElementById('remaining-time').textContent = formatDuration(remainingMs);
+        
+        // Update metronome based on tempo mode
+        this.updateTempoMode();
+    }
+    
+    updateProgressBar() {
+        const percentage = (this.currentTime / this.duration) * 100;
+        document.getElementById('track-progress-fill').style.width = `${percentage}%`;
+        document.getElementById('track-progress-handle').style.left = `${percentage}%`;
+        
+        document.getElementById('current-time').textContent = formatDuration(this.currentTime * 1000);
+        document.getElementById('total-time').textContent = formatDuration(this.duration * 1000);
+    }
+    
+    togglePlayPause() {
+        if (this.playlist.length === 0) {
+            alert('No playlist loaded!');
+            return;
+        }
+        
+        this.isPlaying = !this.isPlaying;
+        const button = document.getElementById('play-pause');
+        button.textContent = this.isPlaying ? '⏸' : '▶';
+        
+        if (this.isPlaying) {
+            metronome.start();
+        } else {
+            metronome.stop();
+        }
+    }
+    
+    previousTrack() {
+        if (this.currentIndex > 0) {
+            this.currentIndex--;
+            this.updatePlayerDisplay();
+            this.simulateTrackPlayback();
+        }
+    }
+    
+    nextTrack() {
+        if (this.currentIndex < this.playlist.length - 1) {
+            this.currentIndex++;
+            this.updatePlayerDisplay();
+            this.simulateTrackPlayback();
+        } else {
+            // End of playlist
+            this.isPlaying = false;
+            document.getElementById('play-pause').textContent = '▶';
+            metronome.stop();
+            clearInterval(this.progressInterval);
+        }
+    }
+    
+    updateTempoMode() {
+        const currentTrack = this.playlist[this.currentIndex];
+        if (!currentTrack) return;
+        
+        const tempoMode = document.querySelector('input[name="tempo-mode"]:checked').value;
+        const targetBPM = parseInt(document.getElementById('target-bpm').value);
+        
+        if (tempoMode === 'adjust-song') {
+            // Option 1: Adjust song tempo to target BPM
+            const originalBPM = currentTrack.tempo;
+            this.playbackRate = targetBPM / originalBPM;
+            
+            // Note: In a real implementation, you'd apply this to the audio source
+            addDebugLog(`Song tempo adjusted: ${originalBPM.toFixed(1)} → ${targetBPM} BPM (rate: ${this.playbackRate.toFixed(2)}x)`);
+            
+            metronome.setBPM(targetBPM);
+        } else {
+            // Option 2: Adjust metronome to song BPM
+            this.playbackRate = 1.0;
+            metronome.setBPM(Math.round(currentTrack.tempo));
+        }
+    }
+}
+
+// Metronome class
+class Metronome {
+    constructor() {
+        this.bpm = 120;
+        this.isRunning = false;
+        this.intervalId = null;
+        this.audioContext = null;
+        this.volume = 0.5;
+        
+        this.bindEvents();
+        this.initializeAudio();
+    }
+    
+    async initializeAudio() {
+        try {
+            this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        } catch (error) {
+            console.error('Failed to initialize metronome audio:', error);
+        }
+    }
+    
+    bindEvents() {
+        document.getElementById('metronome-toggle').addEventListener('click', () => {
+            this.toggle();
+        });
+        
+        document.getElementById('metronome-volume').addEventListener('input', (e) => {
+            this.volume = e.target.value / 100;
+        });
+    }
+    
+    setBPM(bpm) {
+        this.bpm = bpm;
+        document.getElementById('metronome-bpm').textContent = `${bpm} BPM`;
+        
+        if (this.isRunning) {
+            this.stop();
+            this.start();
+        }
+    }
+    
+    start() {
+        if (this.isRunning) return;
+        
+        this.isRunning = true;
+        document.getElementById('metronome-toggle').textContent = 'Stop Metronome';
+        
+        const interval = 60000 / this.bpm; // milliseconds per beat
+        
+        this.intervalId = setInterval(() => {
+            this.playBeat();
+            this.visualBeat();
+        }, interval);
+    }
+    
+    stop() {
+        if (!this.isRunning) return;
+        
+        this.isRunning = false;
+        document.getElementById('metronome-toggle').textContent = 'Start Metronome';
+        
+        if (this.intervalId) {
+            clearInterval(this.intervalId);
+            this.intervalId = null;
+        }
+    }
+    
+    toggle() {
+        if (this.isRunning) {
+            this.stop();
+        } else {
+            this.start();
+        }
+    }
+    
+    playBeat() {
+        if (!this.audioContext || this.volume === 0) return;
+        
+        try {
+            const oscillator = this.audioContext.createOscillator();
+            const gainNode = this.audioContext.createGain();
+            
+            oscillator.connect(gainNode);
+            gainNode.connect(this.audioContext.destination);
+            
+            oscillator.frequency.setValueAtTime(800, this.audioContext.currentTime);
+            gainNode.gain.setValueAtTime(this.volume * 0.3, this.audioContext.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, this.audioContext.currentTime + 0.1);
+            
+            oscillator.start(this.audioContext.currentTime);
+            oscillator.stop(this.audioContext.currentTime + 0.1);
+        } catch (error) {
+            console.error('Error playing metronome beat:', error);
+        }
+    }
+    
+    visualBeat() {
+        const beatElement = document.getElementById('metronome-visual');
+        beatElement.classList.add('active');
+        
+        setTimeout(() => {
+            beatElement.classList.remove('active');
+        }, 150);
+    }
+}
+
+// Initialize components
+const audioPlayer = new AudioPlayer();
+const metronome = new Metronome();
 
 // ============= Initialize =============
 checkForToken();
