@@ -469,7 +469,7 @@ async function getTracksWithBPM(tracks, targetBPM, tolerance) {
   let successCount = 0;
 
   // LIMIT TO FIRST 30 TRACKS FOR DEBUGGING
-  const DEBUG_LIMIT = 10;
+  const DEBUG_LIMIT = 500;
   const tracksToProcess = tracks.slice(0, DEBUG_LIMIT);
   
   addDebugLog('--- Analyzing BPM using ReccoBeats batch API ---');
@@ -486,7 +486,7 @@ async function getTracksWithBPM(tracks, targetBPM, tolerance) {
   };
 
   // Process in batches (let's try smaller batches first)
-  const BATCH_SIZE = 10;
+  const BATCH_SIZE = 40;
   
   for (let i = 0; i < tracksToProcess.length; i += BATCH_SIZE) {
     const batch = tracksToProcess.slice(i, i + BATCH_SIZE);
