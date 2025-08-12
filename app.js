@@ -2,7 +2,7 @@
 //addDebugLog('VERSION STAMP', { build: 'getTracksWithBPM MAX_IDS=20 / single-ID fallback v3' });
 
 const CLIENT_ID = '593a5515c27d4db4873b52036524e37c'; 
-const REDIRECT_URI = 'https://0b9c5f03c43b.ngrok-free.app';//'http://localhost:3000';
+const REDIRECT_URI = 'https://l1yz.github.io/pacer';//'http://localhost:3000';
 const SCOPES = [
     'user-read-private',
     'user-library-read',  // ADDED: For Liked Songs access
