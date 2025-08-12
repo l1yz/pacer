@@ -560,7 +560,20 @@ async function getTracksWithBPM(tracks, targetBPM, tolerance) {
       addDebugLog(`Audio features array length: ${audioFeatures.length}`);
       addDebugLog(`First audio feature sample:`, audioFeatures[0]);
 
-      // Map features back to tracks by index (order should match request order)
+      // CRITICAL FIX: Map audio features back to tracks correctly
+      // ReccoBeats returns features in same order as the IDs we sent (validTracks order)
+      
+      // First, create a map of trackId -> audioFeature
+      const audioFeatureMap = new Map();
+      audioFeatures.forEach((feature, index) => {
+        if (index < validTracks.length) {
+          const trackId = validTracks[index].id;
+          audioFeatureMap.set(trackId, feature);
+          addDebugLog(`Mapped feature[${index}] to track ID: ${trackId}`);
+        }
+      });
+      
+      // Now process all tracks in the batch
       batch.forEach((track, batchIndex) => {
         if (!track || !track.id) {
           tracksWithBPM.push({ ...track, tempo: null });
@@ -568,15 +581,10 @@ async function getTracksWithBPM(tracks, targetBPM, tolerance) {
           return;
         }
 
-        // Find the corresponding audio feature by valid track index
-        const validTrackIndex = validTracks.findIndex(vt => vt.id === track.id);
-        let audioFeature = null;
+        // Get the correct audio feature for this specific track ID
+        const audioFeature = audioFeatureMap.get(track.id);
         
-        if (validTrackIndex >= 0 && validTrackIndex < audioFeatures.length) {
-          audioFeature = audioFeatures[validTrackIndex];
-        }
-
-        addDebugLog(`Track "${track.name}": batchIndex=${batchIndex}, validTrackIndex=${validTrackIndex}, audioFeature exists=${!!audioFeature}`);
+        addDebugLog(`Track "${track.name}" (${track.id}): audioFeature exists=${!!audioFeature}`);
         if (audioFeature) {
           addDebugLog(`  Audio feature for "${track.name}":`, audioFeature);
         }
@@ -1081,16 +1089,44 @@ class BeatDetector {
     
     async requestAudioAccess() {
         try {
-            // Request system audio capture via screen sharing
-            this.audioStream = await navigator.mediaDevices.getDisplayMedia({
-                video: false,
-                audio: {
-                    echoCancellation: false,
-                    noiseSuppression: false,
-                    autoGainControl: false,
-                    sampleRate: 44100
+            addDebugLog('Requesting system audio access...');
+            
+            // Check if getDisplayMedia is supported
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+                // Fallback: try getUserMedia for microphone (less ideal but might work)
+                addDebugLog('getDisplayMedia not supported, trying microphone fallback...');
+                try {
+                    this.audioStream = await navigator.mediaDevices.getUserMedia({ 
+                        audio: {
+                            echoCancellation: false,
+                            noiseSuppression: false,
+                            autoGainControl: false
+                        }
+                    });
+                    addDebugLog('Microphone access granted - will detect ambient audio');
+                } catch (micError) {
+                    throw new Error('Neither system audio nor microphone access available');
                 }
-            });
+            } else {
+                // Request system audio capture via screen sharing
+                this.audioStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: false,
+                    audio: {
+                        echoCancellation: false,
+                        noiseSuppression: false,
+                        autoGainControl: false,
+                        sampleRate: 44100
+                    }
+                });
+            }
+            
+            // Check if we actually got audio
+            const audioTracks = this.audioStream.getAudioTracks();
+            if (audioTracks.length === 0) {
+                throw new Error('No audio track received - make sure to check "Share audio" in the permission dialog');
+            }
+            
+            addDebugLog(`Audio stream received: ${audioTracks.length} audio tracks`);
             
             // Set up audio analysis
             this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -1105,7 +1141,17 @@ class BeatDetector {
             return true;
             
         } catch (error) {
-            addDebugLog(`Audio capture failed: ${error.message}`);
+            addDebugLog(`Audio capture failed: ${error.name} - ${error.message}`);
+            
+            // Provide specific guidance based on error type
+            if (error.name === 'NotAllowedError') {
+                alert('Audio access denied. Please:\n1. Click "Enable Auto-Sync" again\n2. In the permission dialog, check "Share audio"\n3. Click "Share" (not Cancel)');
+            } else if (error.name === 'NotSupportedError') {
+                alert('Audio capture not supported in this browser. Try Chrome or Firefox.');
+            } else {
+                alert(`Audio capture failed: ${error.message}`);
+            }
+            
             return false;
         }
     }
