@@ -519,6 +519,7 @@ async function getTracksWithBPM(tracks, targetBPM, tolerance) {
 
       addDebugLog(`Batch ${Math.floor(i/BATCH_SIZE) + 1}: Requesting ${validTracks.length} tracks`);
       addDebugLog(`Track IDs: ${trackIds.join(', ')}`);
+      addDebugLog(`Track Names: ${validTracks.map(t => t.name).join(', ')}`);
       addDebugLog(`Full URL: ${url.toString()}`);
 
       const response = await fetch(url.toString(), requestOptions);
@@ -563,13 +564,52 @@ async function getTracksWithBPM(tracks, targetBPM, tolerance) {
       // CRITICAL FIX: Map audio features back to tracks correctly
       // ReccoBeats returns features in same order as the IDs we sent (validTracks order)
       
+      // VALIDATION: Check if ReccoBeats returns sensible data
+      addDebugLog(`=== VALIDATION CHECK ===`);
+      addDebugLog(`Sent ${validTracks.length} track IDs, got ${audioFeatures.length} features`);
+      
+      if (audioFeatures.length !== validTracks.length) {
+        addDebugLog(`⚠️  WARNING: Mismatch between sent IDs (${validTracks.length}) and received features (${audioFeatures.length})`);
+      }
+      
+      // Check if any features contain identifying information for validation
+      audioFeatures.forEach((feature, index) => {
+        const identifiers = [];
+        
+        // Check for various ID fields
+        if (feature.spotify_id) identifiers.push(`spotify_id: ${feature.spotify_id}`);
+        if (feature.spotifyId) identifiers.push(`spotifyId: ${feature.spotifyId}`);
+        if (feature.id) identifiers.push(`id: ${feature.id}`);
+        if (feature.track_id) identifiers.push(`track_id: ${feature.track_id}`);
+        
+        // Check for track name/title fields  
+        if (feature.name) identifiers.push(`name: "${feature.name}"`);
+        if (feature.title) identifiers.push(`title: "${feature.title}"`);
+        if (feature.track_name) identifiers.push(`track_name: "${feature.track_name}"`);
+        if (feature.song) identifiers.push(`song: "${feature.song}"`);
+        
+        // Check for artist fields
+        if (feature.artist) identifiers.push(`artist: "${feature.artist}"`);
+        if (feature.artist_name) identifiers.push(`artist_name: "${feature.artist_name}"`);
+        
+        if (identifiers.length > 0) {
+          addDebugLog(`Feature[${index}] contains: ${identifiers.join(', ')}`);
+        } else {
+          addDebugLog(`Feature[${index}] has no identifying information (only audio features)`);
+        }
+        
+        // Show all available keys for debugging
+        addDebugLog(`Feature[${index}] keys: ${Object.keys(feature).join(', ')}`);
+      });
+      
       // First, create a map of trackId -> audioFeature
       const audioFeatureMap = new Map();
       audioFeatures.forEach((feature, index) => {
         if (index < validTracks.length) {
           const trackId = validTracks[index].id;
+          const trackName = validTracks[index].name;
           audioFeatureMap.set(trackId, feature);
-          addDebugLog(`Mapped feature[${index}] to track ID: ${trackId}`);
+          addDebugLog(`Mapped feature[${index}] (tempo: ${feature.tempo?.toFixed(1)}) to "${trackName}" (${trackId})`);
         }
       });
       
@@ -587,6 +627,28 @@ async function getTracksWithBPM(tracks, targetBPM, tolerance) {
         addDebugLog(`Track "${track.name}" (${track.id}): audioFeature exists=${!!audioFeature}`);
         if (audioFeature) {
           addDebugLog(`  Audio feature for "${track.name}":`, audioFeature);
+          
+          // Check for obvious mismatches
+          if (audioFeature.name && audioFeature.name !== track.name) {
+            addDebugLog(`  🚨 NAME MISMATCH: Expected "${track.name}", got "${audioFeature.name}"`);
+          }
+          
+          // Check for genre/style mismatches based on acousticness
+          const isClassical = track.name.toLowerCase().includes('concerto') || 
+                             track.name.toLowerCase().includes('symphony') || 
+                             track.name.toLowerCase().includes('sonata') ||
+                             track.artists.some(a => a.name.toLowerCase().includes('orchestra'));
+                             
+          const isPop = track.name.toLowerCase().includes('pop') ||
+                       track.artists.some(a => a.name.toLowerCase().includes('pop'));
+          
+          if (isClassical && audioFeature.acousticness < 0.3) {
+            addDebugLog(`  🚨 SUSPICIOUS: Classical track "${track.name}" has low acousticness: ${audioFeature.acousticness}`);
+          }
+          
+          if (isPop && audioFeature.acousticness > 0.8) {
+            addDebugLog(`  🚨 SUSPICIOUS: Pop track "${track.name}" has very high acousticness: ${audioFeature.acousticness}`);
+          }
         }
 
         const tempo = audioFeature?.tempo || audioFeature?.bpm || null;
