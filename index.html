@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spotify BPM Runner - 120 BPM Playlist Generator</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>🏃 BPM Runner for Spotify</h1>
+        <p class="subtitle">Find all your ~120 BPM songs perfect for running!</p>
+        
+        <!-- Login Section -->
+        <div id="login-section" class="section">
+            <button id="login-button" class="btn-primary">
+                Connect with Spotify
+            </button>
+        </div>
+
+        <!-- Main App (Hidden Initially) -->
+        <div id="app-section" class="section hidden">
+            <div class="user-info">
+                <span id="user-name"></span>
+                <button id="logout-button" class="btn-small">Logout</button>
+            </div>
+
+            <div class="controls">
+                <label>
+                    Target BPM: 
+                    <input type="number" id="target-bpm" value="120" min="60" max="200">
+                </label>
+                <label>
+                    Tolerance (±): 
+                    <input type="number" id="tolerance" value="5" min="1" max="20">
+                </label>
+            </div>
+
+            <button id="analyze-button" class="btn-primary">
+                Analyze My Music
+            </button>
+
+            <div id="progress" class="progress hidden">
+                <div class="progress-text">Analyzing...</div>
+                <div class="progress-bar">
+                    <div id="progress-fill"></div>
+                </div>
+            </div>
+
+            <div id="results" class="results hidden">
+                <h2>Found <span id="track-count">0</span> matching tracks!</h2>
+                <div id="track-list"></div>
+                <button id="create-playlist" class="btn-success">
+                    Create Playlist in Spotify
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
