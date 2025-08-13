@@ -505,9 +505,6 @@ async function getTracksWithBPM(tracks, targetBPM, tolerance) {
     const validTracks = batch.filter(track => track && track.id);
     
     if (validTracks.length === 0) {
-      // Add all tracks in this batch as null tempo
-      batch.forEach(track => tracksWithBPM.push({ ...track, tempo: null }));
-      noAudioFeatures += batch.length;
       continue;
     }
 
@@ -515,159 +512,33 @@ async function getTracksWithBPM(tracks, targetBPM, tolerance) {
       // Clean the track IDs - remove any spotify: prefix if present
       const trackIds = validTracks.map(track => track.id.replace('spotify:track:', ''));
       
-      // Create URL with ids parameter
+      // Create URL with ids parameter for batch ID lookup
       const url = new URL('https://api.reccobeats.com/v1/audio-features');
       url.searchParams.append('ids', trackIds.join(','));
 
-      addDebugLog(`Batch ${Math.floor(i/BATCH_SIZE) + 1}: Requesting ${validTracks.length} tracks`);
-      addDebugLog(`Track IDs: ${trackIds.join(', ')}`);
-      addDebugLog(`Track Names: ${validTracks.map(t => t.name).join(', ')}`);
-      addDebugLog(`Full URL: ${url.toString()}`);
+      addDebugLog(`Batch ${Math.floor(i/BATCH_SIZE) + 1}: Getting ReccoBeats IDs for ${validTracks.length} tracks`);
+      addDebugLog(`Spotify Track Names: ${validTracks.map(t => t.name).join(', ')}`);
 
       const response = await fetch(url.toString(), requestOptions);
       
-      addDebugLog(`Response status: ${response.status} ${response.statusText}`);
-
-      // Get response as text first to see exactly what we're getting
-      const responseText = await response.text();
-      addDebugLog(`Raw response text:`, responseText);
-
       if (!response.ok) {
-        addDebugLog(`❌ Batch API error: ${response.status} ${response.statusText}`);
-        addDebugLog(`Response body: ${responseText}`);
-        
-        // Add all tracks in this batch as null tempo
-        batch.forEach(track => tracksWithBPM.push({ ...track, tempo: null }));
-        noAudioFeatures += batch.length;
+        addDebugLog(`❌ Batch ID lookup error: ${response.status} ${response.statusText}`);
         continue;
       }
 
-      // Try to parse as JSON
-      let data;
-      try {
-        data = JSON.parse(responseText);
-        addDebugLog(`Parsed JSON response:`, data);
-      } catch (parseError) {
-        addDebugLog(`❌ JSON parse error: ${parseError.message}`);
-        
-        // Add all tracks in this batch as null tempo
-        batch.forEach(track => tracksWithBPM.push({ ...track, tempo: null }));
-        noAudioFeatures += batch.length;
-        continue;
-      }
-
-      // The response should be an array of audio features or an object with audio_features array
-      const audioFeatures = Array.isArray(data) ? data : (data.content || data.audio_features || data.features || []);
+      const data = await response.json();
+      const features = Array.isArray(data) ? data : (data.content || data.audio_features || data.features || []);
       
-      addDebugLog(`Raw data type: ${typeof data}, is array: ${Array.isArray(data)}`);
-      addDebugLog(`Audio features array length: ${audioFeatures.length}`);
-      addDebugLog(`First audio feature sample:`, audioFeatures[0]);
-
-      // CRITICAL FIX: Map audio features back to tracks correctly
-      // ReccoBeats returns features in same order as the IDs we sent (validTracks order)
+      addDebugLog(`Got ${features.length} ReccoBeats IDs for ${validTracks.length} Spotify tracks`);
       
-      // VALIDATION: Check if ReccoBeats returns sensible data
-      addDebugLog(`=== VALIDATION CHECK ===`);
-      addDebugLog(`Sent ${validTracks.length} track IDs, got ${audioFeatures.length} features`);
-      
-      if (audioFeatures.length !== validTracks.length) {
-        addDebugLog(`⚠️  WARNING: Mismatch between sent IDs (${validTracks.length}) and received features (${audioFeatures.length})`);
-      }
-      
-      // Check if any features contain identifying information for validation
-      audioFeatures.forEach((feature, index) => {
-        const identifiers = [];
-        
-        // Check for various ID fields
-        if (feature.spotify_id) identifiers.push(`spotify_id: ${feature.spotify_id}`);
-        if (feature.spotifyId) identifiers.push(`spotifyId: ${feature.spotifyId}`);
-        if (feature.id) identifiers.push(`id: ${feature.id}`);
-        if (feature.track_id) identifiers.push(`track_id: ${feature.track_id}`);
-        
-        // Check for track name/title fields  
-        if (feature.name) identifiers.push(`name: "${feature.name}"`);
-        if (feature.title) identifiers.push(`title: "${feature.title}"`);
-        if (feature.track_name) identifiers.push(`track_name: "${feature.track_name}"`);
-        if (feature.song) identifiers.push(`song: "${feature.song}"`);
-        
-        // Check for artist fields
-        if (feature.artist) identifiers.push(`artist: "${feature.artist}"`);
-        if (feature.artist_name) identifiers.push(`artist_name: "${feature.artist_name}"`);
-        
-        if (identifiers.length > 0) {
-          addDebugLog(`Feature[${index}] contains: ${identifiers.join(', ')}`);
-        } else {
-          addDebugLog(`Feature[${index}] has no identifying information (only audio features)`);
-        }
-        
-        // Show all available keys for debugging
-        addDebugLog(`Feature[${index}] keys: ${Object.keys(feature).join(', ')}`);
-      });
-      
-      // First, create a map of trackId -> audioFeature
-      const audioFeatureMap = new Map();
-      audioFeatures.forEach((feature, index) => {
-        if (index < validTracks.length) {
-          const trackId = validTracks[index].id;
-          const trackName = validTracks[index].name;
-          audioFeatureMap.set(trackId, feature);
-          addDebugLog(`Mapped feature[${index}] (tempo: ${feature.tempo?.toFixed(1)}) to "${trackName}" (${trackId})`);
-        }
-      });
-      
-      // Now process all tracks in the batch
-      batch.forEach((track, batchIndex) => {
-        if (!track || !track.id) {
-          tracksWithBPM.push({ ...track, tempo: null });
-          noAudioFeatures++;
-          return;
-        }
-
-        // Get the correct audio feature for this specific track ID
-        const audioFeature = audioFeatureMap.get(track.id);
-        
-        addDebugLog(`Track "${track.name}" (${track.id}): audioFeature exists=${!!audioFeature}`);
-        if (audioFeature) {
-          addDebugLog(`  Audio feature for "${track.name}":`, audioFeature);
-          
-          // Check for obvious mismatches
-          if (audioFeature.name && audioFeature.name !== track.name) {
-            addDebugLog(`  🚨 NAME MISMATCH: Expected "${track.name}", got "${audioFeature.name}"`);
-          }
-          
-          // Check for genre/style mismatches based on acousticness
-          const isClassical = track.name.toLowerCase().includes('concerto') || 
-                             track.name.toLowerCase().includes('symphony') || 
-                             track.name.toLowerCase().includes('sonata') ||
-                             track.artists.some(a => a.name.toLowerCase().includes('orchestra'));
-                             
-          const isPop = track.name.toLowerCase().includes('pop') ||
-                       track.artists.some(a => a.name.toLowerCase().includes('pop'));
-          
-          if (isClassical && audioFeature.acousticness < 0.3) {
-            addDebugLog(`  🚨 SUSPICIOUS: Classical track "${track.name}" has low acousticness: ${audioFeature.acousticness}`);
-          }
-          
-          if (isPop && audioFeature.acousticness > 0.8) {
-            addDebugLog(`  🚨 SUSPICIOUS: Pop track "${track.name}" has very high acousticness: ${audioFeature.acousticness}`);
-          }
-        }
-
-        const tempo = audioFeature?.tempo || audioFeature?.bpm || null;
-
-        if (tempo && typeof tempo === 'number' && tempo > 0) {
-          tracksWithBPM.push({ ...track, tempo: tempo });
-          successCount++;
-          const diff = Math.abs(tempo - targetBPM);
-          const symbol = diff <= tolerance ? '✅' : '⭕';
-          addDebugLog(`${symbol} "${track.name}" - ${tempo.toFixed(1)} BPM (diff: ${diff.toFixed(1)})`);
-        } else {
-          tracksWithBPM.push({ ...track, tempo: null });
-          noAudioFeatures++;
-          addDebugLog(`❌ No BPM for "${track.name}" (got: ${tempo})`);
-          if (audioFeature) {
-            addDebugLog(`Audio feature object:`, audioFeature);
-          }
+      // Map Spotify IDs to ReccoBeats IDs for Step 2
+      features.forEach((feature, index) => {
+        if (index < validTracks.length && feature.id) {
+          const spotifyId = validTracks[index].id;
+          const spotifyName = validTracks[index].name;
+          const reccoBeatId = feature.id;
+          trackIdMapping.set(spotifyId, reccoBeatId);
+          addDebugLog(`✓ Mapped "${spotifyName}" -> ReccoBeats ID: ${reccoBeatId}`);
         }
       });
 
@@ -676,16 +547,105 @@ async function getTracksWithBPM(tracks, targetBPM, tolerance) {
 
     } catch (error) {
       addDebugLog(`❌ Batch fetch error: ${error.message}`);
-      
-      // Add all tracks in this batch as null tempo
-      batch.forEach(track => tracksWithBPM.push({ ...track, tempo: null }));
-      noAudioFeatures += batch.length;
     }
 
     // Update progress
     updateProgress(
-      `Analyzing BPM... (${Math.min(i + BATCH_SIZE, tracksToProcess.length)}/${tracksToProcess.length} tracks)`,
-      60 + (20 * Math.min(i + BATCH_SIZE, tracksToProcess.length) / tracksToProcess.length)
+      `Getting ReccoBeats IDs... (${Math.min(i + BATCH_SIZE, tracksToProcess.length)}/${tracksToProcess.length} tracks)`,
+      40 + (20 * Math.min(i + BATCH_SIZE, tracksToProcess.length) / tracksToProcess.length)
+    );
+  }
+
+  addDebugLog(`=== ID MAPPING COMPLETE: ${trackIdMapping.size} tracks mapped ===`);
+
+  // STEP 2: Get detailed audio features using ReccoBeats IDs (individual calls)
+  addDebugLog('=== STEP 2: Getting detailed audio features ===');
+  
+  for (let i = 0; i < tracksToProcess.length; i++) {
+    const track = tracksToProcess[i];
+    
+    if (!track || !track.id) {
+      tracksWithBPM.push({ ...track, tempo: null });
+      noAudioFeatures++;
+      continue;
+    }
+
+    const reccoBeatId = trackIdMapping.get(track.id);
+    if (!reccoBeatId) {
+      tracksWithBPM.push({ ...track, tempo: null });
+      noAudioFeatures++;
+      addDebugLog(`❌ No ReccoBeats ID found for "${track.name}"`);
+      continue;
+    }
+
+    try {
+      // Use individual track endpoint with ReccoBeats ID
+      const url = `https://api.reccobeats.com/v1/track/${reccoBeatId}/audio-features`;
+      
+      addDebugLog(`Fetching detailed features for "${track.name}" (ReccoBeats ID: ${reccoBeatId})`);
+      
+      const response = await fetch(url, requestOptions);
+      
+      if (!response.ok) {
+        addDebugLog(`❌ Individual track error for "${track.name}": ${response.status} ${response.statusText}`);
+        tracksWithBPM.push({ ...track, tempo: null });
+        noAudioFeatures++;
+        continue;
+      }
+
+      const audioFeature = await response.json();
+      addDebugLog(`✓ Got detailed features for "${track.name}":`, audioFeature);
+
+      // Check for track name/artist validation if available
+      if (audioFeature.name && audioFeature.name !== track.name) {
+        addDebugLog(`  🚨 NAME MISMATCH: Expected "${track.name}", got "${audioFeature.name}"`);
+      }
+
+      // Check for genre/style validation based on acousticness
+      const isClassical = track.name.toLowerCase().includes('concerto') || 
+                         track.name.toLowerCase().includes('symphony') || 
+                         track.name.toLowerCase().includes('sonata') ||
+                         track.artists.some(a => a.name.toLowerCase().includes('orchestra'));
+                         
+      const isPop = track.name.toLowerCase().includes('pop') ||
+                   track.artists.some(a => a.name.toLowerCase().includes('pop'));
+      
+      if (isClassical && audioFeature.acousticness < 0.5) {
+        addDebugLog(`  🚨 SUSPICIOUS: Classical track "${track.name}" has low acousticness: ${audioFeature.acousticness}`);
+      }
+      
+      if (isPop && audioFeature.acousticness > 0.8) {
+        addDebugLog(`  🚨 SUSPICIOUS: Pop track "${track.name}" has very high acousticness: ${audioFeature.acousticness}`);
+      }
+
+      const tempo = audioFeature?.tempo || audioFeature?.bpm || null;
+
+      if (tempo && typeof tempo === 'number' && tempo > 0) {
+        tracksWithBPM.push({ ...track, tempo: tempo });
+        successCount++;
+        const diff = Math.abs(tempo - targetBPM);
+        const symbol = diff <= tolerance ? '✅' : '⭕';
+        addDebugLog(`${symbol} "${track.name}" - ${tempo.toFixed(1)} BPM (diff: ${diff.toFixed(1)}) [acousticness: ${audioFeature.acousticness?.toFixed(3)}]`);
+      } else {
+        tracksWithBPM.push({ ...track, tempo: null });
+        noAudioFeatures++;
+        addDebugLog(`❌ No valid BPM for "${track.name}" (got: ${tempo})`);
+      }
+
+      // Add delay between individual calls (shorter than batch delay)
+      await new Promise(resolve => setTimeout(resolve, 300));
+
+    } catch (error) {
+      addDebugLog(`❌ Error fetching features for "${track.name}": ${error.message}`);
+      tracksWithBPM.push({ ...track, tempo: null });
+      noAudioFeatures++;
+    }
+
+    // Update progress
+    const processed = i + 1;
+    updateProgress(
+      `Getting audio features... (${processed}/${tracksToProcess.length} tracks)`,
+      60 + (20 * processed / tracksToProcess.length)
     );
   }
 
