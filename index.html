@@ -42,6 +42,13 @@
                     Songs to Analyze: 
                     <input type="number" id="song-limit" value="100" min="10" max="1000">
                 </label>
+                <label>
+                    Playlist to Analyze:
+                    <select id="playlist-selector">
+                        <option value="liked">Liked Songs</option>
+                        <option value="loading" disabled>Loading playlists...</option>
+                    </select>
+                </label>
             </div>
 
             <button id="analyze-button" class="btn-primary">

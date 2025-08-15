@@ -182,11 +182,6 @@ function showApp() {
         debugDiv.innerHTML = `
             <div style="margin-top: 20px; padding: 20px; background: rgba(0,0,0,0.2); border-radius: 10px;">
                 <h3 style="color: white;">Debug Output:</h3>
-                <div style="margin-bottom: 10px;">
-                    <label style="color: white;">
-                        <input type="checkbox" id="liked-songs-only" checked> Analyze Liked Songs Only
-                    </label>
-                </div>
                 <button id="download-debug" class="btn-small" style="margin-bottom: 10px;">Download CSV Report</button>
                 <div id="debug-content" style="max-height: 300px; overflow-y: auto; font-family: monospace; font-size: 12px; white-space: pre-wrap; background: rgba(0,0,0,0.3); padding: 10px; color: #0f0;"></div>
             </div>
@@ -318,6 +313,9 @@ async function loadUserInfo() {
         const user = await spotifyAPI('v1/me');
         document.getElementById('user-name').textContent = `Hello, ${user.display_name}!`;
         
+        // Load playlists for the dropdown
+        await loadPlaylistOptions();
+        
         // Initialize Spotify Player after authentication
         if (typeof Spotify !== 'undefined') {
             await initializeSpotifyPlayer();
@@ -327,6 +325,61 @@ async function loadUserInfo() {
     } catch (error) {
         console.error('Failed to load user info:', error);
     }
+}
+
+// Load playlist options for the dropdown
+async function loadPlaylistOptions() {
+    try {
+        const selector = document.getElementById('playlist-selector');
+        
+        // Clear loading option
+        selector.innerHTML = '<option value="liked">Liked Songs</option>';
+        
+        addDebugLog('Loading playlists for dropdown...');
+        const playlists = await getAllPlaylists();
+        
+        // Add each playlist as an option
+        playlists.forEach(playlist => {
+            const option = document.createElement('option');
+            option.value = playlist.id;
+            option.textContent = `${playlist.name} (${playlist.tracks?.total || '?'} tracks)`;
+            selector.appendChild(option);
+        });
+        
+        addDebugLog(`Loaded ${playlists.length} playlists into dropdown`);
+        
+    } catch (error) {
+        addDebugLog(`Failed to load playlists: ${error.message}`);
+        const selector = document.getElementById('playlist-selector');
+        selector.innerHTML = '<option value="liked">Liked Songs</option><option disabled>Failed to load playlists</option>';
+    }
+}
+
+// Get tracks from a specific playlist
+async function getTracksFromPlaylist(playlistId) {
+    const tracks = [];
+    let offset = 0;
+    let hasMore = true;
+    
+    addDebugLog(`Fetching tracks from playlist: ${playlistId}`);
+    
+    while (hasMore) {
+        const response = await spotifyAPI(`v1/playlists/${playlistId}/tracks?limit=100&offset=${offset}`);
+        
+        // Filter out null tracks and extract the track objects
+        const validTracks = response.items
+            .filter(item => item.track && item.track.id)
+            .map(item => item.track);
+        
+        tracks.push(...validTracks);
+        hasMore = response.next !== null;
+        offset += 100;
+        
+        addDebugLog(`Fetched ${tracks.length} tracks so far...`);
+    }
+    
+    addDebugLog(`Total tracks from playlist: ${tracks.length}`);
+    return tracks;
 }
 
 // ============= NEW: Get Liked Songs Function =============
@@ -354,7 +407,7 @@ async function getLikedSongs() {
 document.getElementById('analyze-button').addEventListener('click', async () => {
     const targetBPM = parseInt(document.getElementById('target-bpm').value);
     const tolerance = parseInt(document.getElementById('tolerance').value);
-    const likedSongsOnly = document.getElementById('liked-songs-only').checked;
+    const selectedPlaylist = document.getElementById('playlist-selector').value;
     
     // Clear previous debug logs
     debugLog = [];
@@ -363,7 +416,7 @@ document.getElementById('analyze-button').addEventListener('click', async () => 
     }
     
     addDebugLog(`Starting analysis: Target BPM = ${targetBPM}, Tolerance = ±${tolerance}`);
-    addDebugLog(`Mode: ${likedSongsOnly ? 'Liked Songs Only' : 'All Playlists'}`);
+    addDebugLog(`Selected playlist: ${selectedPlaylist === 'liked' ? 'Liked Songs' : selectedPlaylist}`);
     
     // Show progress
     document.getElementById('progress').classList.remove('hidden');
@@ -372,17 +425,14 @@ document.getElementById('analyze-button').addEventListener('click', async () => 
     try {
         let allTracks = [];
         
-        if (likedSongsOnly) {
-            // Get only Liked Songs
+        if (selectedPlaylist === 'liked') {
+            // Get Liked Songs
             updateProgress('Fetching your Liked Songs...', 20);
             allTracks = await getLikedSongs();
         } else {
-            // Original behavior - get all playlists
-            updateProgress('Fetching your playlists...', 10);
-            const playlists = await getAllPlaylists();
-            
-            updateProgress('Collecting tracks...', 30);
-            allTracks = await getAllTracksFromPlaylists(playlists);
+            // Get tracks from selected playlist
+            updateProgress('Fetching tracks from selected playlist...', 20);
+            allTracks = await getTracksFromPlaylist(selectedPlaylist);
         }
         
         addDebugLog(`Total unique tracks to analyze: ${allTracks.length}`);
