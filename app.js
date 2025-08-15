@@ -545,64 +545,57 @@ async function getTracksWithBPM(tracks, targetBPM, tolerance) {
     redirect: "follow"
   };
 
-  // STEP 1: Get ReccoBeats track IDs from Spotify IDs (batch)
+  // STEP 1: Get ReccoBeats track IDs from Spotify IDs (individual calls)
   addDebugLog('=== STEP 1: Getting ReccoBeats track IDs ===');
   const trackIdMapping = new Map(); // spotifyId -> reccoBeatId
-  const BATCH_SIZE = 40;
   
-  for (let i = 0; i < tracksToProcess.length; i += BATCH_SIZE) {
-    const batch = tracksToProcess.slice(i, i + BATCH_SIZE);
-    const validTracks = batch.filter(track => track && track.id);
+  for (let i = 0; i < tracksToProcess.length; i++) {
+    const track = tracksToProcess[i];
     
-    if (validTracks.length === 0) {
+    if (!track || !track.id) {
+      addDebugLog(`❌ Invalid track at index ${i}`);
       continue;
     }
 
     try {
-      // Clean the track IDs - remove any spotify: prefix if present
-      const trackIds = validTracks.map(track => track.id.replace('spotify:track:', ''));
+      // Clean the track ID - remove any spotify: prefix if present
+      const trackId = track.id.replace('spotify:track:', '');
       
-      // Create URL with ids parameter for batch ID lookup
+      // Create URL for individual track ID lookup
       const url = new URL('https://api.reccobeats.com/v1/audio-features');
-      url.searchParams.append('ids', trackIds.join(','));
+      url.searchParams.append('ids', trackId);
 
-      addDebugLog(`Batch ${Math.floor(i/BATCH_SIZE) + 1}: Getting ReccoBeats IDs for ${validTracks.length} tracks`);
-      addDebugLog(`Spotify Track Names: ${validTracks.map(t => t.name).join(', ')}`);
+      addDebugLog(`Getting ReccoBeats ID for "${track.name}" (${i + 1}/${tracksToProcess.length})`);
 
       const response = await fetch(url.toString(), requestOptions);
       
       if (!response.ok) {
-        addDebugLog(`❌ Batch ID lookup error: ${response.status} ${response.statusText}`);
+        addDebugLog(`❌ ID lookup error for "${track.name}": ${response.status} ${response.statusText}`);
         continue;
       }
 
       const data = await response.json();
       const features = Array.isArray(data) ? data : (data.content || data.audio_features || data.features || []);
       
-      addDebugLog(`Got ${features.length} ReccoBeats IDs for ${validTracks.length} Spotify tracks`);
-      
-      // Map Spotify IDs to ReccoBeats IDs for Step 2
-      features.forEach((feature, index) => {
-        if (index < validTracks.length && feature.id) {
-          const spotifyId = validTracks[index].id;
-          const spotifyName = validTracks[index].name;
-          const reccoBeatId = feature.id;
-          trackIdMapping.set(spotifyId, reccoBeatId);
-          addDebugLog(`✓ Mapped "${spotifyName}" -> ReccoBeats ID: ${reccoBeatId}`);
-        }
-      });
+      if (features.length > 0 && features[0].id) {
+        const reccoBeatId = features[0].id;
+        trackIdMapping.set(track.id, reccoBeatId);
+        addDebugLog(`✓ Mapped "${track.name}" -> ReccoBeats ID: ${reccoBeatId}`);
+      } else {
+        addDebugLog(`❌ No ReccoBeats ID found for "${track.name}"`);
+      }
 
-      // Add delay between batches
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      // Add delay between individual calls
+      await new Promise(resolve => setTimeout(resolve, 300));
 
     } catch (error) {
-      addDebugLog(`❌ Batch fetch error: ${error.message}`);
+      addDebugLog(`❌ Fetch error for "${track.name}": ${error.message}`);
     }
 
     // Update progress
     updateProgress(
-      `Getting ReccoBeats IDs... (${Math.min(i + BATCH_SIZE, tracksToProcess.length)}/${tracksToProcess.length} tracks)`,
-      40 + (20 * Math.min(i + BATCH_SIZE, tracksToProcess.length) / tracksToProcess.length)
+      `Getting ReccoBeats IDs... (${i + 1}/${tracksToProcess.length} tracks)`,
+      40 + (20 * (i + 1) / tracksToProcess.length)
     );
   }
 
