@@ -601,16 +601,105 @@ async function getTracksWithBPM(tracks, targetBPM, tolerance) {
 
   addDebugLog(`=== ID MAPPING COMPLETE: ${trackIdMapping.size} tracks mapped ===`);
 
-  // STEP 2: Get detailed audio features using ReccoBeats IDs (individual calls)
+  // STEP 2: Get detailed audio features using ReccoBeats IDs
   addDebugLog('=== STEP 2: Getting detailed audio features ===');
   
-  for (let i = 0; i < tracksToProcess.length; i++) {
-    const track = tracksToProcess[i];
+  // Option to use batch calls for Step 2 (set to false for safety, true for speed)
+  const USE_BATCH_STEP2 = false;
+  const BATCH_SIZE_STEP2 = 20;
+  
+  if (USE_BATCH_STEP2) {
+    addDebugLog('Using BATCH mode for Step 2');
+    await processBatchStep2();
+  } else {
+    addDebugLog('Using INDIVIDUAL mode for Step 2');
+    await processIndividualStep2();
+  }
+
+  async function processBatchStep2() {
+    // Get tracks that have ReccoBeats IDs
+    const tracksWithIds = tracksToProcess.filter(track => 
+      track && track.id && trackIdMapping.has(track.id)
+    );
     
+    for (let i = 0; i < tracksWithIds.length; i += BATCH_SIZE_STEP2) {
+      const batch = tracksWithIds.slice(i, i + BATCH_SIZE_STEP2);
+      const reccoIds = batch.map(track => trackIdMapping.get(track.id));
+      
+      try {
+        // Create batch URL for audio features
+        const url = new URL('https://api.reccobeats.com/v1/audio-features');
+        url.searchParams.append('ids', reccoIds.join(','));
+        
+        addDebugLog(`Batch ${Math.floor(i/BATCH_SIZE_STEP2) + 1}: Getting features for ${batch.length} tracks`);
+        addDebugLog(`Track names: ${batch.map(t => t.name).join(', ')}`);
+        
+        const response = await fetch(url.toString(), requestOptions);
+        
+        if (!response.ok) {
+          addDebugLog(`❌ Batch features error: ${response.status} ${response.statusText}`);
+          // Fall back to individual calls for this batch
+          for (const track of batch) {
+            await processIndividualTrack(track);
+          }
+          continue;
+        }
+        
+        const data = await response.json();
+        const features = Array.isArray(data) ? data : (data.content || data.audio_features || data.features || []);
+        
+        addDebugLog(`Got ${features.length} feature sets for ${batch.length} tracks`);
+        
+        // Process results - since Step 1 was individual, IDs should be in order
+        features.forEach((audioFeature, index) => {
+          if (index < batch.length) {
+            const track = batch[index];
+            processTrackFeatures(track, audioFeature);
+          }
+        });
+        
+        // Add delay between batches
+        await new Promise(resolve => setTimeout(resolve, 800));
+        
+      } catch (error) {
+        addDebugLog(`❌ Batch error: ${error.message}`);
+        // Fall back to individual calls for this batch
+        for (const track of batch) {
+          await processIndividualTrack(track);
+        }
+      }
+      
+      // Update progress
+      updateProgress(
+        `Getting audio features (batch)... (${Math.min(i + BATCH_SIZE_STEP2, tracksWithIds.length)}/${tracksWithIds.length} tracks)`,
+        60 + (20 * Math.min(i + BATCH_SIZE_STEP2, tracksWithIds.length) / tracksWithIds.length)
+      );
+    }
+    
+    // Handle tracks without ReccoBeats IDs
+    for (const track of tracksToProcess) {
+      if (!track || !track.id || !trackIdMapping.has(track.id)) {
+        tracksWithBPM.push({ ...track, tempo: null });
+        noAudioFeatures++;
+        if (track && track.name) {
+          addDebugLog(`❌ No ReccoBeats ID for "${track.name}"`);
+        }
+      }
+    }
+  }
+
+  async function processIndividualStep2() {
+    for (let i = 0; i < tracksToProcess.length; i++) {
+      const track = tracksToProcess[i];
+      await processIndividualTrack(track, i);
+    }
+  }
+
+  async function processIndividualTrack(track, index = null) {
     if (!track || !track.id) {
       tracksWithBPM.push({ ...track, tempo: null });
       noAudioFeatures++;
-      continue;
+      return;
     }
 
     const reccoBeatId = trackIdMapping.get(track.id);
@@ -618,7 +707,7 @@ async function getTracksWithBPM(tracks, targetBPM, tolerance) {
       tracksWithBPM.push({ ...track, tempo: null });
       noAudioFeatures++;
       addDebugLog(`❌ No ReccoBeats ID found for "${track.name}"`);
-      continue;
+      return;
     }
 
     try {
@@ -633,49 +722,15 @@ async function getTracksWithBPM(tracks, targetBPM, tolerance) {
         addDebugLog(`❌ Individual track error for "${track.name}": ${response.status} ${response.statusText}`);
         tracksWithBPM.push({ ...track, tempo: null });
         noAudioFeatures++;
-        continue;
+        return;
       }
 
       const audioFeature = await response.json();
       addDebugLog(`✓ Got detailed features for "${track.name}":`, audioFeature);
 
-      // Check for track name/artist validation if available
-      if (audioFeature.name && audioFeature.name !== track.name) {
-        addDebugLog(`  🚨 NAME MISMATCH: Expected "${track.name}", got "${audioFeature.name}"`);
-      }
+      processTrackFeatures(track, audioFeature);
 
-      // Check for genre/style validation based on acousticness
-      const isClassical = track.name.toLowerCase().includes('concerto') || 
-                         track.name.toLowerCase().includes('symphony') || 
-                         track.name.toLowerCase().includes('sonata') ||
-                         track.artists.some(a => a.name.toLowerCase().includes('orchestra'));
-                         
-      const isPop = track.name.toLowerCase().includes('pop') ||
-                   track.artists.some(a => a.name.toLowerCase().includes('pop'));
-      
-      if (isClassical && audioFeature.acousticness < 0.5) {
-        addDebugLog(`  🚨 SUSPICIOUS: Classical track "${track.name}" has low acousticness: ${audioFeature.acousticness}`);
-      }
-      
-      if (isPop && audioFeature.acousticness > 0.8) {
-        addDebugLog(`  🚨 SUSPICIOUS: Pop track "${track.name}" has very high acousticness: ${audioFeature.acousticness}`);
-      }
-
-      const tempo = audioFeature?.tempo || audioFeature?.bpm || null;
-
-      if (tempo && typeof tempo === 'number' && tempo > 0) {
-        tracksWithBPM.push({ ...track, tempo: tempo });
-        successCount++;
-        const diff = Math.abs(tempo - targetBPM);
-        const symbol = diff <= tolerance ? '✅' : '⭕';
-        addDebugLog(`${symbol} "${track.name}" - ${tempo.toFixed(1)} BPM (diff: ${diff.toFixed(1)}) [acousticness: ${audioFeature.acousticness?.toFixed(3)}]`);
-      } else {
-        tracksWithBPM.push({ ...track, tempo: null });
-        noAudioFeatures++;
-        addDebugLog(`❌ No valid BPM for "${track.name}" (got: ${tempo})`);
-      }
-
-      // Add delay between individual calls (shorter than batch delay)
+      // Add delay between individual calls
       await new Promise(resolve => setTimeout(resolve, 300));
 
     } catch (error) {
@@ -684,12 +739,52 @@ async function getTracksWithBPM(tracks, targetBPM, tolerance) {
       noAudioFeatures++;
     }
 
-    // Update progress
-    const processed = i + 1;
-    updateProgress(
-      `Getting audio features... (${processed}/${tracksToProcess.length} tracks)`,
-      60 + (20 * processed / tracksToProcess.length)
-    );
+    // Update progress if index provided
+    if (index !== null) {
+      const processed = index + 1;
+      updateProgress(
+        `Getting audio features... (${processed}/${tracksToProcess.length} tracks)`,
+        60 + (20 * processed / tracksToProcess.length)
+      );
+    }
+  }
+
+  function processTrackFeatures(track, audioFeature) {
+    // Check for track name/artist validation if available
+    if (audioFeature.name && audioFeature.name !== track.name) {
+      addDebugLog(`  🚨 NAME MISMATCH: Expected "${track.name}", got "${audioFeature.name}"`);
+    }
+
+    // Check for genre/style validation based on acousticness
+    const isClassical = track.name.toLowerCase().includes('concerto') || 
+                       track.name.toLowerCase().includes('symphony') || 
+                       track.name.toLowerCase().includes('sonata') ||
+                       track.artists.some(a => a.name.toLowerCase().includes('orchestra'));
+                       
+    const isPop = track.name.toLowerCase().includes('pop') ||
+                 track.artists.some(a => a.name.toLowerCase().includes('pop'));
+    
+    if (isClassical && audioFeature.acousticness < 0.5) {
+      addDebugLog(`  🚨 SUSPICIOUS: Classical track "${track.name}" has low acousticness: ${audioFeature.acousticness}`);
+    }
+    
+    if (isPop && audioFeature.acousticness > 0.8) {
+      addDebugLog(`  🚨 SUSPICIOUS: Pop track "${track.name}" has very high acousticness: ${audioFeature.acousticness}`);
+    }
+
+    const tempo = audioFeature?.tempo || audioFeature?.bpm || null;
+
+    if (tempo && typeof tempo === 'number' && tempo > 0) {
+      tracksWithBPM.push({ ...track, tempo: tempo });
+      successCount++;
+      const diff = Math.abs(tempo - targetBPM);
+      const symbol = diff <= tolerance ? '✅' : '⭕';
+      addDebugLog(`${symbol} "${track.name}" - ${tempo.toFixed(1)} BPM (diff: ${diff.toFixed(1)}) [acousticness: ${audioFeature.acousticness?.toFixed(3)}]`);
+    } else {
+      tracksWithBPM.push({ ...track, tempo: null });
+      noAudioFeatures++;
+      addDebugLog(`❌ No valid BPM for "${track.name}" (got: ${tempo})`);
+    }
   }
 
   addDebugLog(`\n📊 Analysis Summary:`);
