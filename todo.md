@@ -101,3 +101,10 @@ const BATCH_SIZE_STEP2 = 20;   // Adjustable batch size
 2. Compare individual vs batched results
 3. Verify BPM values match expected values
 4. Check for any order mismatches in logs
+
+
+
+
+
+##### small issues to fix:
+when starting 

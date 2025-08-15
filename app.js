@@ -1014,14 +1014,28 @@ class AudioPlayer {
             if (playlistTrack) {
                 this.currentTrack = playlistTrack;
                 this.updatePlayerDisplay();
-                
-                // Auto-calibrate if auto-sync is enabled and track is playing
-                if (beatDetector.audioStream && this.isPlaying && !beatDetector.isListening) {
-                    setTimeout(() => {
-                        addDebugLog(`Track changed to: ${track.name} - starting auto-calibration`);
-                        beatDetector.startCalibration(track.id);
-                    }, 2000); // Wait 2 seconds for track to fully start
-                }
+            } else {
+                // Track not in our analyzed playlist - fetch BPM from Spotify API
+                this.currentTrack = {
+                    id: track.id,
+                    name: track.name,
+                    artists: track.artists,
+                    duration_ms: track.duration_ms,
+                    tempo: null // Will be fetched if needed
+                };
+                addDebugLog(`New track detected: ${track.name} - attempting to fetch BPM`);
+                this.fetchTrackBPM(track.id);
+            }
+            
+            // Auto-match BPM when track changes (regardless of mode)
+            this.autoMatchBPM();
+            
+            // Auto-calibrate beat sync if auto-sync is enabled and track is playing
+            if (beatDetector.audioStream && this.isPlaying && !beatDetector.isListening) {
+                setTimeout(() => {
+                    addDebugLog(`Track changed to: ${track.name} - starting auto-calibration`);
+                    beatDetector.startCalibration(track.id);
+                }, 2000); // Wait 2 seconds for track to fully start
             }
         }
         
@@ -1030,7 +1044,7 @@ class AudioPlayer {
         const button = document.getElementById('play-pause');
         button.textContent = this.isPlaying ? '⏸' : '▶';
         
-        // Update metronome based on current track
+        // Update metronome based on current track (for manual mode changes)
         if (this.currentTrack) {
             this.updateTempoMode();
         }
@@ -1198,8 +1212,95 @@ class AudioPlayer {
         }
     }
     
+    autoMatchBPM() {
+        if (!this.currentTrack) return;
+        
+        // Check if track has BPM data
+        if (this.currentTrack.tempo && this.currentTrack.tempo > 0) {
+            const trackBPM = Math.round(this.currentTrack.tempo);
+            metronome.setBPM(trackBPM);
+            addDebugLog(`🎵 Auto-matched metronome to song BPM: ${trackBPM}`);
+            
+            // Update UI to show matched BPM
+            if (document.getElementById('current-track-bpm')) {
+                document.getElementById('current-track-bpm').textContent = `${trackBPM} BPM`;
+            }
+        } else {
+            // No BPM data available - use target BPM as fallback
+            const targetBPM = parseInt(document.getElementById('target-bpm').value);
+            metronome.setBPM(targetBPM);
+            addDebugLog(`⚠️ No BPM data for "${this.currentTrack.name}" - using target BPM: ${targetBPM}`);
+            
+            // Update UI to show fallback BPM
+            if (document.getElementById('current-track-bpm')) {
+                document.getElementById('current-track-bpm').textContent = `${targetBPM} BPM (target)`;
+            }
+        }
+    }
+    
+    async fetchTrackBPM(trackId) {
+        try {
+            // First try to get BPM from Spotify's audio features
+            const audioFeatures = await spotifyAPI(`v1/audio-features/${trackId}`);
+            if (audioFeatures && audioFeatures.tempo) {
+                this.currentTrack.tempo = audioFeatures.tempo;
+                addDebugLog(`✅ Fetched BPM from Spotify: ${audioFeatures.tempo.toFixed(1)} for "${this.currentTrack.name}"`);
+                this.autoMatchBPM(); // Re-run auto-match with new BPM data
+                return;
+            }
+        } catch (error) {
+            addDebugLog(`❌ Failed to fetch BPM from Spotify: ${error.message}`);
+        }
+        
+        // Fallback: Try ReccoBeats API for BPM (similar to existing analysis)
+        try {
+            const myHeaders = new Headers();
+            myHeaders.append("Accept", "application/json");
+            
+            const requestOptions = {
+                method: "GET",
+                headers: myHeaders,
+                redirect: "follow"
+            };
+            
+            // Get ReccoBeats track ID
+            const url = new URL('https://api.reccobeats.com/v1/audio-features');
+            url.searchParams.append('ids', trackId);
+            
+            const response = await fetch(url.toString(), requestOptions);
+            if (!response.ok) throw new Error(`ReccoBeats API error: ${response.status}`);
+            
+            const data = await response.json();
+            const features = Array.isArray(data) ? data : (data.content || data.audio_features || data.features || []);
+            
+            if (features.length > 0 && features[0].id) {
+                // Get detailed audio features using ReccoBeats ID
+                const detailsUrl = `https://api.reccobeats.com/v1/track/${features[0].id}/audio-features`;
+                const detailsResponse = await fetch(detailsUrl, requestOptions);
+                
+                if (detailsResponse.ok) {
+                    const audioFeature = await detailsResponse.json();
+                    const tempo = audioFeature?.tempo || audioFeature?.bpm;
+                    
+                    if (tempo && typeof tempo === 'number' && tempo > 0) {
+                        this.currentTrack.tempo = tempo;
+                        addDebugLog(`✅ Fetched BPM from ReccoBeats: ${tempo.toFixed(1)} for "${this.currentTrack.name}"`);
+                        this.autoMatchBPM(); // Re-run auto-match with new BPM data
+                        return;
+                    }
+                }
+            }
+        } catch (error) {
+            addDebugLog(`❌ Failed to fetch BPM from ReccoBeats: ${error.message}`);
+        }
+        
+        // If all methods fail, auto-match will use target BPM as fallback
+        addDebugLog(`⚠️ Could not fetch BPM for "${this.currentTrack.name}" - will use target BPM as fallback`);
+        this.autoMatchBPM();
+    }
+    
     updateTempoMode() {
-        const currentTrack = this.playlist[this.currentIndex];
+        const currentTrack = this.playlist[this.currentIndex] || this.currentTrack;
         if (!currentTrack) return;
         
         const tempoMode = document.querySelector('input[name="tempo-mode"]:checked').value;
@@ -1208,19 +1309,29 @@ class AudioPlayer {
         if (tempoMode === 'adjust-song') {
             // Option 1: Adjust song tempo to target BPM
             const originalBPM = currentTrack.tempo;
-            this.playbackRate = targetBPM / originalBPM;
-            
-            // NOTE: Spotify Web Playback SDK doesn't support tempo/pitch adjustment
-            // This shows the calculated playback rate that would be needed
-            addDebugLog(`Tempo calculation: ${originalBPM.toFixed(1)} → ${targetBPM} BPM (would need ${this.playbackRate.toFixed(2)}x rate)`);
-            addDebugLog(`Note: Spotify API doesn't support tempo adjustment. Use metronome for pacing.`);
+            if (originalBPM && originalBPM > 0) {
+                this.playbackRate = targetBPM / originalBPM;
+                
+                // NOTE: Spotify Web Playback SDK doesn't support tempo/pitch adjustment
+                // This shows the calculated playback rate that would be needed
+                addDebugLog(`Tempo calculation: ${originalBPM.toFixed(1)} → ${targetBPM} BPM (would need ${this.playbackRate.toFixed(2)}x rate)`);
+                addDebugLog(`Note: Spotify API doesn't support tempo adjustment. Use metronome for pacing.`);
+            } else {
+                addDebugLog(`⚠️ No BPM data available for tempo calculation`);
+            }
             
             metronome.setBPM(targetBPM);
         } else {
             // Option 2: Adjust metronome to song BPM (recommended)
             this.playbackRate = 1.0;
-            metronome.setBPM(Math.round(currentTrack.tempo));
-            addDebugLog(`Metronome set to match song: ${Math.round(currentTrack.tempo)} BPM`);
+            if (currentTrack.tempo && currentTrack.tempo > 0) {
+                metronome.setBPM(Math.round(currentTrack.tempo));
+                addDebugLog(`Metronome set to match song: ${Math.round(currentTrack.tempo)} BPM`);
+            } else {
+                // Fallback to target BPM if no track BPM available
+                metronome.setBPM(targetBPM);
+                addDebugLog(`⚠️ No track BPM available - using target BPM: ${targetBPM}`);
+            }
         }
     }
 }
@@ -1241,12 +1352,32 @@ class BeatDetector {
         this.fftSize = 2048;
         this.bassFreqRange = { min: 0, max: 8 }; // Indices for ~60-120Hz
         this.beatThreshold = 0.3;
+        this.adaptiveThreshold = 0.3; // Dynamic threshold that adapts to volume
         this.minBeatInterval = 300; // Min 300ms between beats (200 BPM max)
         this.lastBeatTime = 0;
+        this.energyHistory = []; // Track energy levels for adaptive thresholding
+        this.maxEnergyHistorySize = 100;
+        
+        // Enhanced frequency ranges for different music styles
+        this.frequencyRanges = {
+            kick: { min: 0, max: 8 },      // ~60-120Hz - Kick drums
+            snare: { min: 8, max: 24 },    // ~120-350Hz - Snare drums  
+            lowMid: { min: 24, max: 64 },  // ~350-800Hz - Low mids
+            highMid: { min: 64, max: 128 } // ~800-1600Hz - High mids
+        };
         
         // Calibration settings
-        this.calibrationDuration = 10000; // 10 seconds
-        this.minBeatsRequired = 8; // Need at least 8 beats for good calibration
+        this.calibrationDuration = 15000; // 15 seconds for better accuracy
+        this.minBeatsRequired = 10; // Need at least 10 beats for good calibration
+        this.maxCalibrationAttempts = 3;
+        this.currentCalibrationAttempt = 0;
+        
+        // Manual tap sync settings
+        this.tapTimes = [];
+        this.maxTapHistory = 8; // Keep last 8 taps for analysis
+        this.isTapSyncActive = false;
+        this.minTapsRequired = 4; // Need at least 4 taps for sync
+        this.maxTapInterval = 2000; // Max 2 seconds between taps
     }
     
     async requestAudioAccess() {
@@ -1290,8 +1421,12 @@ class BeatDetector {
             
             addDebugLog(`Audio stream received: ${audioTracks.length} audio tracks`);
             
-            // Set up audio analysis
-            this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            // Set up audio analysis with proper browser compatibility
+            const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+            if (!AudioContextClass) {
+                throw new Error('Web Audio API not supported in this browser');
+            }
+            this.audioContext = new AudioContextClass();
             const source = this.audioContext.createMediaStreamSource(this.audioStream);
             this.analyser = this.audioContext.createAnalyser();
             
@@ -1319,20 +1454,31 @@ class BeatDetector {
     }
     
     startCalibration(trackId) {
-        if (!this.analyser || this.isListening) return false;
+        if (!this.analyser) {
+            addDebugLog('⚠️ No audio analyser available - cannot start calibration');
+            return false;
+        }
+        
+        if (this.isListening) {
+            addDebugLog('⚠️ Calibration already in progress');
+            return false;
+        }
         
         this.currentTrackId = trackId;
         this.detectedBeats = [];
+        this.energyHistory = []; // Reset energy history for new track
         this.calibrationStartTime = Date.now();
         this.isListening = true;
         this.beatOffset = null;
+        this.currentCalibrationAttempt++;
         
         // Update UI
         document.getElementById('sync-status').classList.remove('hidden');
         document.getElementById('sync-progress').classList.add('listening');
-        document.getElementById('sync-text').textContent = 'Listening for beats...';
+        document.getElementById('sync-text').textContent = 
+            `Listening for beats... (attempt ${this.currentCalibrationAttempt}/${this.maxCalibrationAttempts})`;
         
-        addDebugLog(`Starting beat calibration for track: ${trackId}`);
+        addDebugLog(`Starting beat calibration for track: ${trackId} (attempt ${this.currentCalibrationAttempt})`);
         this.calibrationLoop();
         
         // Auto-stop after calibration duration
@@ -1378,24 +1524,57 @@ class BeatDetector {
         const frequencyData = new Uint8Array(this.analyser.frequencyBinCount);
         this.analyser.getByteFrequencyData(frequencyData);
         
-        // Calculate bass energy (kick drum range ~60-120Hz)
-        let bassEnergy = 0;
-        for (let i = this.bassFreqRange.min; i <= this.bassFreqRange.max; i++) {
-            bassEnergy += frequencyData[i];
-        }
-        bassEnergy /= (this.bassFreqRange.max - this.bassFreqRange.min + 1);
-        bassEnergy /= 255; // Normalize to 0-1
+        // Calculate energy in multiple frequency ranges
+        const energies = {
+            kick: this.calculateRangeEnergy(frequencyData, this.frequencyRanges.kick),
+            snare: this.calculateRangeEnergy(frequencyData, this.frequencyRanges.snare),
+            lowMid: this.calculateRangeEnergy(frequencyData, this.frequencyRanges.lowMid),
+            highMid: this.calculateRangeEnergy(frequencyData, this.frequencyRanges.highMid)
+        };
         
-        // Simple beat detection: look for sudden increases in bass energy
-        const currentTime = Date.now();
-        if (bassEnergy > this.beatThreshold && 
-            currentTime - this.lastBeatTime > this.minBeatInterval) {
+        // Focus on kick and snare for beat detection (most reliable)
+        const totalBeatEnergy = (energies.kick * 0.7) + (energies.snare * 0.3);
+        
+        // Update energy history for adaptive thresholding
+        this.energyHistory.push(totalBeatEnergy);
+        if (this.energyHistory.length > this.maxEnergyHistorySize) {
+            this.energyHistory.shift();
+        }
+        
+        // Calculate adaptive threshold based on recent energy levels
+        if (this.energyHistory.length > 10) {
+            const avgEnergy = this.energyHistory.reduce((a, b) => a + b, 0) / this.energyHistory.length;
+            const maxEnergy = Math.max(...this.energyHistory);
             
+            // Set threshold between average and max, closer to max for sensitivity
+            this.adaptiveThreshold = avgEnergy + ((maxEnergy - avgEnergy) * 0.6);
+        }
+        
+        // Enhanced beat detection with spectral flux analysis
+        const currentTime = Date.now();
+        const isEnergyPeak = totalBeatEnergy > this.adaptiveThreshold;
+        const isTimingValid = currentTime - this.lastBeatTime > this.minBeatInterval;
+        
+        // Additional validation: check if energy significantly increased from recent average
+        const recentAvg = this.energyHistory.length > 5 ? 
+            this.energyHistory.slice(-5).reduce((a, b) => a + b, 0) / 5 : totalBeatEnergy;
+        const isSignificantIncrease = totalBeatEnergy > recentAvg * 1.3;
+        
+        if (isEnergyPeak && isTimingValid && isSignificantIncrease) {
             this.lastBeatTime = currentTime;
+            addDebugLog(`🥁 Beat detected: energy=${totalBeatEnergy.toFixed(3)}, threshold=${this.adaptiveThreshold.toFixed(3)}`);
             return true;
         }
         
         return false;
+    }
+    
+    calculateRangeEnergy(frequencyData, range) {
+        let energy = 0;
+        for (let i = range.min; i <= range.max && i < frequencyData.length; i++) {
+            energy += frequencyData[i];
+        }
+        return energy / (range.max - range.min + 1) / 255; // Normalize to 0-1
     }
     
     stopCalibration() {
@@ -1403,14 +1582,26 @@ class BeatDetector {
         document.getElementById('sync-progress').classList.remove('listening');
         
         if (this.detectedBeats.length < this.minBeatsRequired) {
-            document.getElementById('sync-text').textContent = 
-                `Not enough beats detected (${this.detectedBeats.length}/${this.minBeatsRequired}). Try increasing volume.`;
+            addDebugLog(`Calibration attempt ${this.currentCalibrationAttempt} failed: only ${this.detectedBeats.length} beats detected`);
             
-            setTimeout(() => {
-                document.getElementById('sync-status').classList.add('hidden');
-            }, 3000);
+            // Try again if we haven't reached max attempts
+            if (this.currentCalibrationAttempt < this.maxCalibrationAttempts) {
+                document.getElementById('sync-text').textContent = 
+                    `Not enough beats (${this.detectedBeats.length}/${this.minBeatsRequired}). Retrying...`;
+                
+                // Wait 2 seconds then retry
+                setTimeout(() => {
+                    if (audioPlayer.isPlaying && audioPlayer.currentTrack) {
+                        addDebugLog(`🔄 Retrying calibration (attempt ${this.currentCalibrationAttempt + 1})`);
+                        this.startCalibration(this.currentTrackId);
+                    } else {
+                        this.handleCalibrationFailure();
+                    }
+                }, 2000);
+            } else {
+                this.handleCalibrationFailure();
+            }
             
-            addDebugLog(`Calibration failed: only ${this.detectedBeats.length} beats detected`);
             return false;
         }
         
@@ -1424,8 +1615,25 @@ class BeatDetector {
             document.getElementById('sync-status').classList.add('hidden');
         }, 2000);
         
-        addDebugLog(`Calibration successful: ${this.detectedBeats.length} beats, offset: ${this.beatOffset}ms`);
+        // Reset attempt counter on success
+        this.currentCalibrationAttempt = 0;
+        
+        addDebugLog(`✅ Calibration successful: ${this.detectedBeats.length} beats, offset: ${this.beatOffset}ms`);
         return true;
+    }
+    
+    handleCalibrationFailure() {
+        document.getElementById('sync-text').textContent = 
+            `Sync failed after ${this.maxCalibrationAttempts} attempts. Check audio volume or try manual sync.`;
+        
+        setTimeout(() => {
+            document.getElementById('sync-status').classList.add('hidden');
+        }, 5000);
+        
+        // Reset attempt counter
+        this.currentCalibrationAttempt = 0;
+        
+        addDebugLog(`❌ Calibration failed after ${this.maxCalibrationAttempts} attempts`);
     }
     
     calculateBeatOffset() {
@@ -1461,8 +1669,151 @@ class BeatDetector {
         }, 100);
     }
     
+    startTapSync() {
+        this.isTapSyncActive = true;
+        this.tapTimes = [];
+        
+        // Update UI
+        document.getElementById('sync-status').classList.remove('hidden');
+        document.getElementById('sync-text').textContent = 
+            'Tap the beat! Need at least 4 consistent taps to sync.';
+        
+        const button = document.getElementById('tap-sync-toggle');
+        button.textContent = 'Stop Tap Sync';
+        button.classList.add('active');
+        
+        addDebugLog('👆 Tap sync mode activated - waiting for user taps');
+    }
+    
+    stopTapSync() {
+        this.isTapSyncActive = false;
+        
+        // Update UI
+        document.getElementById('sync-status').classList.add('hidden');
+        
+        const button = document.getElementById('tap-sync-toggle');
+        button.textContent = 'Tap to Sync';
+        button.classList.remove('active');
+        
+        // Clear tap history
+        this.tapTimes = [];
+        
+        addDebugLog('Tap sync mode deactivated');
+    }
+    
+    handleTap() {
+        if (!this.isTapSyncActive) return;
+        
+        const currentTime = Date.now();
+        
+        // Add current tap time
+        this.tapTimes.push(currentTime);
+        
+        // Remove old taps beyond max history
+        if (this.tapTimes.length > this.maxTapHistory) {
+            this.tapTimes.shift();
+        }
+        
+        // Remove taps that are too old (beyond max interval from last tap)
+        this.tapTimes = this.tapTimes.filter(tapTime => 
+            currentTime - tapTime <= this.maxTapInterval * (this.maxTapHistory - 1)
+        );
+        
+        addDebugLog(`👆 Tap ${this.tapTimes.length} recorded`);
+        
+        // Visual feedback for tap
+        this.flashTapFeedback();
+        
+        // Update UI with tap count
+        document.getElementById('sync-text').textContent = 
+            `Tap ${this.tapTimes.length}/${this.minTapsRequired} - Keep tapping to the beat!`;
+        
+        // Try to calculate sync if we have enough taps
+        if (this.tapTimes.length >= this.minTapsRequired) {
+            this.calculateTapSync();
+        }
+    }
+    
+    calculateTapSync() {
+        if (this.tapTimes.length < this.minTapsRequired) return;
+        
+        // Calculate intervals between taps
+        const intervals = [];
+        for (let i = 1; i < this.tapTimes.length; i++) {
+            intervals.push(this.tapTimes[i] - this.tapTimes[i - 1]);
+        }
+        
+        // Calculate median interval to avoid outliers
+        const sortedIntervals = intervals.sort((a, b) => a - b);
+        const medianInterval = sortedIntervals[Math.floor(sortedIntervals.length / 2)];
+        
+        // Check if intervals are consistent (within 20% variance)
+        const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+        const variance = intervals.reduce((sum, interval) => 
+            sum + Math.pow(interval - avgInterval, 2), 0) / intervals.length;
+        const standardDeviation = Math.sqrt(variance);
+        const consistencyThreshold = avgInterval * 0.2; // 20% tolerance
+        
+        if (standardDeviation <= consistencyThreshold) {
+            // Calculate BPM from median interval
+            const tapBPM = 60000 / medianInterval; // Convert ms to BPM
+            
+            // Validate BPM is in reasonable range
+            if (tapBPM >= 60 && tapBPM <= 200) {
+                // Calculate phase offset based on current Spotify position
+                const spotifyPosition = audioPlayer.position || 0;
+                const lastTapTime = this.tapTimes[this.tapTimes.length - 1];
+                const timeSinceLastTap = Date.now() - lastTapTime;
+                const estimatedCurrentPosition = spotifyPosition + timeSinceLastTap;
+                
+                // Calculate beat phase offset
+                const beatInterval = 60000 / tapBPM;
+                const beatOffset = estimatedCurrentPosition % beatInterval;
+                
+                // Apply sync
+                this.beatOffset = beatOffset;
+                metronome.smoothTransitionToPhase(beatOffset, tapBPM);
+                
+                // Update UI
+                document.getElementById('sync-text').textContent = 
+                    `✓ Tap sync complete! BPM: ${tapBPM.toFixed(1)}, offset: ${beatOffset.toFixed(1)}ms`;
+                
+                setTimeout(() => {
+                    this.stopTapSync();
+                }, 2000);
+                
+                addDebugLog(`✅ Tap sync successful: BPM=${tapBPM.toFixed(1)}, offset=${beatOffset.toFixed(1)}ms`);
+                return true;
+            } else {
+                addDebugLog(`⚠️ Calculated BPM (${tapBPM.toFixed(1)}) outside valid range`);
+            }
+        } else {
+            addDebugLog(`⚠️ Tap timing inconsistent (std dev: ${standardDeviation.toFixed(1)}ms)`);
+        }
+        
+        // If we reach here, sync failed - give feedback but continue listening
+        document.getElementById('sync-text').textContent = 
+            `Inconsistent timing. Keep tapping steadily! (${this.tapTimes.length} taps)`;
+        
+        return false;
+    }
+    
+    flashTapFeedback() {
+        const indicator = document.getElementById('metronome-visual');
+        indicator.style.background = '#4CAF50'; // Green for tap feedback
+        indicator.style.transform = 'scale(1.2)';
+        
+        setTimeout(() => {
+            indicator.style.background = '';
+            indicator.style.transform = '';
+        }, 150);
+    }
+    
     cleanup() {
         this.isListening = false;
+        this.isTapSyncActive = false;
+        this.tapTimes = [];
+        
         if (this.audioStream) {
             this.audioStream.getTracks().forEach(track => track.stop());
             this.audioStream = null;
@@ -1492,7 +1843,11 @@ class Metronome {
     
     async initializeAudio() {
         try {
-            this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+            if (!AudioContextClass) {
+                throw new Error('Web Audio API not supported in this browser');
+            }
+            this.audioContext = new AudioContextClass();
         } catch (error) {
             console.error('Failed to initialize metronome audio:', error);
         }
@@ -1509,6 +1864,31 @@ class Metronome {
         
         document.getElementById('auto-sync-toggle').addEventListener('click', () => {
             this.toggleAutoSync();
+        });
+        
+        document.getElementById('tap-sync-toggle').addEventListener('click', (e) => {
+            if (beatDetector.isTapSyncActive) {
+                // If already in tap sync mode, this click counts as a tap
+                beatDetector.handleTap();
+            } else {
+                // If not in tap sync mode, toggle it on
+                this.toggleTapSync();
+            }
+        });
+        
+        // Add tap handler to metronome visual for easier tapping
+        document.getElementById('metronome-visual').addEventListener('click', () => {
+            if (beatDetector.isTapSyncActive) {
+                beatDetector.handleTap();
+            }
+        });
+        
+        // Also allow space bar and Enter key for tapping
+        document.addEventListener('keydown', (e) => {
+            if (beatDetector.isTapSyncActive && (e.code === 'Space' || e.code === 'Enter')) {
+                e.preventDefault();
+                beatDetector.handleTap();
+            }
         });
     }
     
@@ -1541,6 +1921,20 @@ class Metronome {
             button.textContent = 'Enable Auto-Sync';
             button.classList.remove('active');
             addDebugLog('Auto-sync disabled');
+        }
+    }
+    
+    toggleTapSync() {
+        if (beatDetector.isTapSyncActive) {
+            beatDetector.stopTapSync();
+        } else {
+            // Stop auto-sync if it's active
+            if (beatDetector.isListening) {
+                beatDetector.isListening = false;
+                document.getElementById('sync-status').classList.add('hidden');
+            }
+            
+            beatDetector.startTapSync();
         }
     }
     
