@@ -1030,6 +1030,20 @@ class AudioPlayer {
             // Auto-match BPM when track changes (regardless of mode)
             this.autoMatchBPM();
             
+            // Auto-mute metronome and prepare for tap sync on track change
+            if (metronome.isRunning) {
+                metronome.stop();
+                addDebugLog('🔇 Metronome muted for new track - ready for tap sync');
+            }
+            
+            // Reset tap sync for new track
+            beatDetector.tapTimes = [];
+            const tapButton = document.getElementById('tap-sync-toggle');
+            if (tapButton) {
+                tapButton.textContent = 'Tap to Sync';
+                tapButton.classList.remove('active');
+            }
+            
             // Auto-calibrate beat sync if auto-sync is enabled and track is playing
             if (beatDetector.audioStream && this.isPlaying && !beatDetector.isListening) {
                 setTimeout(() => {
@@ -1378,6 +1392,8 @@ class BeatDetector {
         this.isTapSyncActive = false;
         this.minTapsRequired = 4; // Need at least 4 taps for sync
         this.maxTapInterval = 2000; // Max 2 seconds between taps
+        this.isAutoTapMode = true; // Always ready for tap sync
+        this.tapFeedbackAudio = null; // Audio context for tap feedback
     }
     
     async requestAudioAccess() {
@@ -1456,14 +1472,69 @@ class BeatDetector {
             
         } catch (error) {
             addDebugLog(`Audio capture failed: ${error.name} - ${error.message}`);
+            addDebugLog(`Error stack: ${error.stack}`);
             
             // Provide specific guidance based on error type
             if (error.name === 'NotAllowedError') {
                 alert('Audio access denied. Please:\n1. Click "Enable Auto-Sync" again\n2. In the permission dialog, check "Share audio"\n3. Click "Share" (not Cancel)');
             } else if (error.name === 'NotSupportedError') {
-                alert('Audio capture not supported in this browser. Try Chrome or Firefox.');
+                alert('Screen capture not supported or denied. Please:\n1. Make sure you\'re in Chrome/Edge\n2. Select "Chrome Tab" or "Entire Screen"\n3. Check "Share audio" checkbox\n4. Or use "Tap to Sync" instead');
+            } else if (error.name === 'AbortError') {
+                alert('Screen capture was cancelled. Please try again and select "Share" with audio enabled.');
             } else {
-                alert(`Audio capture failed: ${error.message}`);
+                alert(`Audio capture failed: ${error.message}\n\nTry "Tap to Sync" as an alternative.`);
+            }
+            
+            return false;
+        }
+    }
+    
+    async requestMicrophoneAccess() {
+        try {
+            addDebugLog('Requesting microphone access...');
+            
+            this.audioStream = await navigator.mediaDevices.getUserMedia({ 
+                audio: {
+                    echoCancellation: false,
+                    noiseSuppression: false,
+                    autoGainControl: false,
+                    sampleRate: 44100
+                }
+            });
+            
+            // Check if we actually got audio
+            const audioTracks = this.audioStream.getAudioTracks();
+            if (audioTracks.length === 0) {
+                throw new Error('No audio track received from microphone');
+            }
+            
+            addDebugLog(`Microphone stream received: ${audioTracks.length} audio tracks`);
+            
+            // Set up audio analysis
+            const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+            if (!AudioContextClass) {
+                throw new Error('Web Audio API not supported in this browser');
+            }
+            this.audioContext = new AudioContextClass();
+            const source = this.audioContext.createMediaStreamSource(this.audioStream);
+            this.analyser = this.audioContext.createAnalyser();
+            
+            this.analyser.fftSize = this.fftSize;
+            this.analyser.smoothingTimeConstant = 0.3;
+            source.connect(this.analyser);
+            
+            addDebugLog('Microphone capture initialized successfully');
+            return true;
+            
+        } catch (error) {
+            addDebugLog(`Microphone capture failed: ${error.name} - ${error.message}`);
+            
+            if (error.name === 'NotAllowedError') {
+                alert('Microphone access denied. Please allow microphone access and try again.');
+            } else if (error.name === 'NotFoundError') {
+                alert('No microphone found. Please connect a microphone and try again.');
+            } else {
+                alert(`Microphone capture failed: ${error.message}`);
             }
             
             return false;
@@ -1686,41 +1757,47 @@ class BeatDetector {
         }, 100);
     }
     
-    startTapSync() {
-        this.isTapSyncActive = true;
-        this.tapTimes = [];
-        
-        // Update UI
-        document.getElementById('sync-status').classList.remove('hidden');
-        document.getElementById('sync-text').textContent = 
-            'Tap the beat! Need at least 4 consistent taps to sync.';
-        
-        const button = document.getElementById('tap-sync-toggle');
-        button.textContent = 'Stop Tap Sync';
-        button.classList.add('active');
-        
-        addDebugLog('👆 Tap sync mode activated - waiting for user taps');
+    initializeTapFeedbackAudio() {
+        if (!this.tapFeedbackAudio) {
+            try {
+                const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+                this.tapFeedbackAudio = new AudioContextClass();
+            } catch (error) {
+                addDebugLog('Failed to initialize tap feedback audio:', error);
+            }
+        }
     }
     
-    stopTapSync() {
-        this.isTapSyncActive = false;
+    playTapFeedback() {
+        this.initializeTapFeedbackAudio();
         
-        // Update UI
-        document.getElementById('sync-status').classList.add('hidden');
+        if (!this.tapFeedbackAudio) return;
         
-        const button = document.getElementById('tap-sync-toggle');
-        button.textContent = 'Tap to Sync';
-        button.classList.remove('active');
-        
-        // Clear tap history
-        this.tapTimes = [];
-        
-        addDebugLog('Tap sync mode deactivated');
+        try {
+            // Resume audio context if suspended
+            if (this.tapFeedbackAudio.state === 'suspended') {
+                this.tapFeedbackAudio.resume();
+            }
+            
+            const oscillator = this.tapFeedbackAudio.createOscillator();
+            const gainNode = this.tapFeedbackAudio.createGain();
+            
+            oscillator.connect(gainNode);
+            gainNode.connect(this.tapFeedbackAudio.destination);
+            
+            // Higher pitched click for tap feedback (different from metronome)
+            oscillator.frequency.setValueAtTime(1200, this.tapFeedbackAudio.currentTime);
+            gainNode.gain.setValueAtTime(0.4, this.tapFeedbackAudio.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, this.tapFeedbackAudio.currentTime + 0.1);
+            
+            oscillator.start(this.tapFeedbackAudio.currentTime);
+            oscillator.stop(this.tapFeedbackAudio.currentTime + 0.1);
+        } catch (error) {
+            addDebugLog('Error playing tap feedback:', error);
+        }
     }
     
     handleTap() {
-        if (!this.isTapSyncActive) return;
-        
         const currentTime = Date.now();
         
         // Add current tap time
@@ -1738,16 +1815,29 @@ class BeatDetector {
         
         addDebugLog(`👆 Tap ${this.tapTimes.length} recorded`);
         
-        // Visual feedback for tap
+        // Always provide audio and visual feedback
+        this.playTapFeedback();
         this.flashTapFeedback();
         
-        // Update UI with tap count
-        document.getElementById('sync-text').textContent = 
-            `Tap ${this.tapTimes.length}/${this.minTapsRequired} - Keep tapping to the beat!`;
+        // Show progress
+        const button = document.getElementById('tap-sync-toggle');
+        button.textContent = `Tap ${this.tapTimes.length}/${this.minTapsRequired}`;
         
         // Try to calculate sync if we have enough taps
         if (this.tapTimes.length >= this.minTapsRequired) {
-            this.calculateTapSync();
+            const success = this.calculateTapSync();
+            if (success) {
+                // Auto-start metronome after successful sync
+                setTimeout(() => {
+                    if (!metronome.isRunning) {
+                        metronome.start();
+                        addDebugLog('🎵 Metronome auto-started after tap sync');
+                    }
+                    // Reset tap counter
+                    this.tapTimes = [];
+                    button.textContent = 'Tap to Sync';
+                }, 1000);
+            }
         }
     }
     
@@ -1799,13 +1889,16 @@ class BeatDetector {
             this.beatOffset = beatOffset;
             metronome.smoothTransitionToPhase(beatOffset, trackBPM);
             
-            // Update UI
-            document.getElementById('sync-text').textContent = 
-                `✓ Tap sync complete! Phase offset: ${beatOffset.toFixed(1)}ms (BPM: ${trackBPM.toFixed(1)})`;
+            // Update UI briefly
+            const button = document.getElementById('tap-sync-toggle');
+            const originalText = button.textContent;
+            button.textContent = '✓ Synced!';
+            button.style.background = '#4CAF50';
             
             setTimeout(() => {
-                this.stopTapSync();
-            }, 2000);
+                button.textContent = 'Tap to Sync';
+                button.style.background = '';
+            }, 1500);
             
             addDebugLog(`✅ Tap sync successful: phase offset=${beatOffset.toFixed(1)}ms, keeping track BPM=${trackBPM.toFixed(1)}`);
             return true;
@@ -1814,8 +1907,15 @@ class BeatDetector {
         }
         
         // If we reach here, sync failed - give feedback but continue listening
-        document.getElementById('sync-text').textContent = 
-            `Inconsistent timing. Keep tapping steadily! (${this.tapTimes.length} taps)`;
+        const button = document.getElementById('tap-sync-toggle');
+        const originalText = button.textContent;
+        button.textContent = 'Try again...';
+        button.style.background = '#ff9800';
+        
+        setTimeout(() => {
+            button.textContent = 'Tap to Sync';
+            button.style.background = '';
+        }, 1500);
         
         return false;
     }
@@ -1888,26 +1988,20 @@ class Metronome {
             this.toggleAutoSync();
         });
         
+        
         document.getElementById('tap-sync-toggle').addEventListener('click', (e) => {
-            if (beatDetector.isTapSyncActive) {
-                // If already in tap sync mode, this click counts as a tap
-                beatDetector.handleTap();
-            } else {
-                // If not in tap sync mode, toggle it on
-                this.toggleTapSync();
-            }
+            // Always count as a tap (no need to toggle mode)
+            beatDetector.handleTap();
         });
         
         // Add tap handler to metronome visual for easier tapping
         document.getElementById('metronome-visual').addEventListener('click', () => {
-            if (beatDetector.isTapSyncActive) {
-                beatDetector.handleTap();
-            }
+            beatDetector.handleTap();
         });
         
         // Also allow space bar and Enter key for tapping
         document.addEventListener('keydown', (e) => {
-            if (beatDetector.isTapSyncActive && (e.code === 'Space' || e.code === 'Enter')) {
+            if ((e.code === 'Space' || e.code === 'Enter') && !e.repeat) {
                 e.preventDefault();
                 beatDetector.handleTap();
             }
@@ -1946,19 +2040,6 @@ class Metronome {
         }
     }
     
-    toggleTapSync() {
-        if (beatDetector.isTapSyncActive) {
-            beatDetector.stopTapSync();
-        } else {
-            // Stop auto-sync if it's active
-            if (beatDetector.isListening) {
-                beatDetector.isListening = false;
-                document.getElementById('sync-status').classList.add('hidden');
-            }
-            
-            beatDetector.startTapSync();
-        }
-    }
     
     setBPM(bpm) {
         this.bpm = bpm;
@@ -1970,12 +2051,27 @@ class Metronome {
         }
     }
     
-    start() {
+    async start() {
         if (this.isRunning) return;
+        
+        // Resume AudioContext if suspended (fixes start delay)
+        if (this.audioContext && this.audioContext.state === 'suspended') {
+            try {
+                await this.audioContext.resume();
+                addDebugLog('AudioContext resumed for metronome');
+            } catch (error) {
+                addDebugLog(`Failed to resume AudioContext: ${error.message}`);
+            }
+        }
         
         this.isRunning = true;
         document.getElementById('metronome-toggle').textContent = 'Stop Metronome';
         
+        // Play first beat immediately to eliminate start delay
+        this.playBeat();
+        this.visualBeat();
+        
+        // Then schedule subsequent beats
         this.scheduleNextBeat();
     }
     
@@ -1985,24 +2081,19 @@ class Metronome {
         const interval = 60000 / this.bpm; // milliseconds per beat
         let nextBeatDelay = interval;
         
-        // Apply phase offset for sync
+        // Apply phase offset for sync (only if not the first beat)
         if (this.phase !== 0) {
             nextBeatDelay = interval - this.phase;
             this.phase = 0; // Reset after first adjusted beat
         }
         
-        this.intervalId = setTimeout(() => {
-            this.playBeat();
-            this.visualBeat();
-            
-            // Schedule next beat with regular interval
+        // Schedule regular intervals using setInterval for consistency
+        this.intervalId = setInterval(() => {
             if (this.isRunning) {
-                this.intervalId = setInterval(() => {
-                    this.playBeat();
-                    this.visualBeat();
-                }, interval);
+                this.playBeat();
+                this.visualBeat();
             }
-        }, nextBeatDelay);
+        }, interval);
     }
     
     smoothTransitionToPhase(beatOffset, bpm) {
