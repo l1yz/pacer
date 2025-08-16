@@ -1384,10 +1384,21 @@ class BeatDetector {
         try {
             addDebugLog('Requesting system audio access...');
             
+            // Debug browser capabilities
+            addDebugLog(`Browser: ${navigator.userAgent}`);
+            addDebugLog(`getDisplayMedia supported: ${!!navigator.mediaDevices?.getDisplayMedia}`);
+            addDebugLog(`getUserMedia supported: ${!!navigator.mediaDevices?.getUserMedia}`);
+            addDebugLog(`HTTPS: ${location.protocol === 'https:'}`);
+            
             // Check if getDisplayMedia is supported
             if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
                 // Fallback: try getUserMedia for microphone (less ideal but might work)
                 addDebugLog('getDisplayMedia not supported, trying microphone fallback...');
+                
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    throw new Error('Neither getDisplayMedia nor getUserMedia supported in this browser. Please use Chrome 72+ or Firefox 66+.');
+                }
+                
                 try {
                     this.audioStream = await navigator.mediaDevices.getUserMedia({ 
                         audio: {
@@ -1398,12 +1409,14 @@ class BeatDetector {
                     });
                     addDebugLog('Microphone access granted - will detect ambient audio');
                 } catch (micError) {
-                    throw new Error('Neither system audio nor microphone access available');
+                    addDebugLog(`Microphone access failed: ${micError.name} - ${micError.message}`);
+                    throw new Error(`Audio access failed: ${micError.message}. Try "Tap to Sync" instead.`);
                 }
             } else {
                 // Request system audio capture via screen sharing
+                // Note: Chrome requires video:true even if we only want audio
                 this.audioStream = await navigator.mediaDevices.getDisplayMedia({
-                    video: false,
+                    video: true, // Required by Chrome, but we'll only use audio
                     audio: {
                         echoCancellation: false,
                         noiseSuppression: false,
@@ -1411,6 +1424,10 @@ class BeatDetector {
                         sampleRate: 44100
                     }
                 });
+                
+                // Stop video track immediately since we only need audio
+                const videoTracks = this.audioStream.getVideoTracks();
+                videoTracks.forEach(track => track.stop());
             }
             
             // Check if we actually got audio
@@ -1755,38 +1772,43 @@ class BeatDetector {
         const consistencyThreshold = avgInterval * 0.2; // 20% tolerance
         
         if (standardDeviation <= consistencyThreshold) {
-            // Calculate BPM from median interval
-            const tapBPM = 60000 / medianInterval; // Convert ms to BPM
+            // Get the current track's BPM (don't change it!)
+            const currentTrack = audioPlayer.currentTrack;
+            const trackBPM = currentTrack?.tempo;
             
-            // Validate BPM is in reasonable range
-            if (tapBPM >= 60 && tapBPM <= 200) {
-                // Calculate phase offset based on current Spotify position
-                const spotifyPosition = audioPlayer.position || 0;
-                const lastTapTime = this.tapTimes[this.tapTimes.length - 1];
-                const timeSinceLastTap = Date.now() - lastTapTime;
-                const estimatedCurrentPosition = spotifyPosition + timeSinceLastTap;
-                
-                // Calculate beat phase offset
-                const beatInterval = 60000 / tapBPM;
-                const beatOffset = estimatedCurrentPosition % beatInterval;
-                
-                // Apply sync
-                this.beatOffset = beatOffset;
-                metronome.smoothTransitionToPhase(beatOffset, tapBPM);
-                
-                // Update UI
+            if (!trackBPM || trackBPM <= 0) {
+                addDebugLog(`⚠️ No track BPM available for sync - need track BPM data first`);
                 document.getElementById('sync-text').textContent = 
-                    `✓ Tap sync complete! BPM: ${tapBPM.toFixed(1)}, offset: ${beatOffset.toFixed(1)}ms`;
-                
-                setTimeout(() => {
-                    this.stopTapSync();
-                }, 2000);
-                
-                addDebugLog(`✅ Tap sync successful: BPM=${tapBPM.toFixed(1)}, offset=${beatOffset.toFixed(1)}ms`);
-                return true;
-            } else {
-                addDebugLog(`⚠️ Calculated BPM (${tapBPM.toFixed(1)}) outside valid range`);
+                    `No track BPM available. Play a song with BPM data first.`;
+                return false;
             }
+            
+            // Calculate beat interval from track BPM (not tap BPM!)
+            const beatInterval = 60000 / trackBPM;
+            
+            // Calculate phase offset based on current Spotify position
+            const spotifyPosition = audioPlayer.position || 0;
+            const lastTapTime = this.tapTimes[this.tapTimes.length - 1];
+            const timeSinceLastTap = Date.now() - lastTapTime;
+            const estimatedCurrentPosition = spotifyPosition + timeSinceLastTap;
+            
+            // Calculate where the last tap fell within the beat cycle
+            const beatOffset = estimatedCurrentPosition % beatInterval;
+            
+            // Apply phase sync only (keep existing BPM)
+            this.beatOffset = beatOffset;
+            metronome.smoothTransitionToPhase(beatOffset, trackBPM);
+            
+            // Update UI
+            document.getElementById('sync-text').textContent = 
+                `✓ Tap sync complete! Phase offset: ${beatOffset.toFixed(1)}ms (BPM: ${trackBPM.toFixed(1)})`;
+            
+            setTimeout(() => {
+                this.stopTapSync();
+            }, 2000);
+            
+            addDebugLog(`✅ Tap sync successful: phase offset=${beatOffset.toFixed(1)}ms, keeping track BPM=${trackBPM.toFixed(1)}`);
+            return true;
         } else {
             addDebugLog(`⚠️ Tap timing inconsistent (std dev: ${standardDeviation.toFixed(1)}ms)`);
         }
