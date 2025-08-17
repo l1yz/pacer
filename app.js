@@ -1116,12 +1116,15 @@ class AudioPlayer {
             
         } catch (error) {
             addDebugLog(`❌ Error starting playlist: ${error.message}`);
-            // Don't show alert if music is actually playing
-            if (!this.isPlaying) {
-                alert('Failed to start playlist. Please try again.');
-            } else {
-                addDebugLog('Playlist appears to be playing despite error - continuing...');
-            }
+            
+            // Wait a moment and check if playback actually started
+            setTimeout(() => {
+                if (this.isPlaying) {
+                    addDebugLog('✅ Playlist actually started successfully despite API error');
+                } else {
+                    alert('Failed to start playlist. Please try again.');
+                }
+            }, 1500);
         }
     }
     
@@ -1832,17 +1835,19 @@ class BeatDetector {
         
         // Try to calculate sync if we have enough taps
         if (this.tapTimes.length >= this.minTapsRequired) {
-            const success = this.calculateTapSync();
-            if (success) {
+            const result = this.calculateTapSync();
+            if (result.success) {
                 // Clear timeout since we succeeded
                 if (this.tapTimeoutId) {
                     clearTimeout(this.tapTimeoutId);
                     this.tapTimeoutId = null;
                 }
                 
-                // Calculate when the next beat should occur
+                // Calculate when the next beat should occur (using song BPM, not tap BPM)
                 const timeSinceLastTap = Date.now() - this.tapTimes[this.tapTimes.length - 1];
-                const nextBeatDelay = Math.max(0, avgInterval - timeSinceLastTap);
+                const nextBeatDelay = Math.max(0, result.beatInterval - timeSinceLastTap);
+                
+                addDebugLog(`⏱️ Next beat in ${nextBeatDelay.toFixed(1)}ms`);
                 
                 // Start metronome at the exact moment of the next beat
                 setTimeout(() => {
@@ -1874,7 +1879,7 @@ class BeatDetector {
     }
     
     calculateTapSync() {
-        if (this.tapTimes.length < this.minTapsRequired) return;
+        if (this.tapTimes.length < this.minTapsRequired) return { success: false };
         
         // Calculate intervals between taps
         const intervals = [];
@@ -1902,7 +1907,7 @@ class BeatDetector {
                 addDebugLog(`⚠️ No track BPM available for sync - need track BPM data first`);
                 document.getElementById('sync-text').textContent = 
                     `No track BPM available. Play a song with BPM data first.`;
-                return false;
+                return { success: false };
             }
             
             // Calculate beat interval from track BPM (not tap BPM!)
@@ -1933,7 +1938,7 @@ class BeatDetector {
             }, 1500);
             
             addDebugLog(`✅ Tap sync successful: phase offset=${beatOffset.toFixed(1)}ms, keeping track BPM=${trackBPM}`);
-            return true;
+            return { success: true, beatInterval };
         } else {
             addDebugLog(`⚠️ Tap timing inconsistent (std dev: ${standardDeviation.toFixed(1)}ms)`);
         }
@@ -1948,7 +1953,7 @@ class BeatDetector {
             button.style.background = '';
         }, 1500);
         
-        return false;
+        return { success: false };
     }
     
     flashTapFeedback() {
