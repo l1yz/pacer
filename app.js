@@ -1849,12 +1849,13 @@ class BeatDetector {
                 
                 addDebugLog(`⏱️ Next beat in ${nextBeatDelay.toFixed(1)}ms (song BPM with phase sync)`);
                 
-                // Start metronome at the exact moment of the next beat with phase offset
+                // Start metronome at the exact moment of the next beat
                 setTimeout(() => {
                     if (!metronome.isRunning) {
-                        metronome.phase = this.beatOffset; // Apply stored phase offset
+                        // Reset phase to ensure no extra delay between beats
+                        metronome.phase = 0;
                         metronome.start();
-                        addDebugLog('🎵 Metronome started with song BPM and phase sync');
+                        addDebugLog('🎵 Metronome started at song BPM, synced to tapped timing');
                     }
                 }, nextBeatDelay);
                 
