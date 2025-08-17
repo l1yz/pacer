@@ -1843,17 +1843,18 @@ class BeatDetector {
                     this.tapTimeoutId = null;
                 }
                 
-                // Calculate when the next beat should occur (using song BPM, not tap BPM)
+                // Calculate when the next beat should occur (using song BPM)
                 const timeSinceLastTap = Date.now() - this.tapTimes[this.tapTimes.length - 1];
                 const nextBeatDelay = Math.max(0, result.beatInterval - timeSinceLastTap);
                 
-                addDebugLog(`⏱️ Next beat in ${nextBeatDelay.toFixed(1)}ms`);
+                addDebugLog(`⏱️ Next beat in ${nextBeatDelay.toFixed(1)}ms (song BPM with phase sync)`);
                 
-                // Start metronome at the exact moment of the next beat
+                // Start metronome at the exact moment of the next beat with phase offset
                 setTimeout(() => {
                     if (!metronome.isRunning) {
+                        metronome.phase = this.beatOffset; // Apply stored phase offset
                         metronome.start();
-                        addDebugLog('🎵 Metronome started at exact next beat timing');
+                        addDebugLog('🎵 Metronome started with song BPM and phase sync');
                     }
                 }, nextBeatDelay);
                 
@@ -1922,9 +1923,11 @@ class BeatDetector {
             // Calculate where the last tap fell within the beat cycle
             const beatOffset = estimatedCurrentPosition % beatInterval;
             
-            // Apply phase sync only (keep existing BPM)
+            // Keep metronome at song BPM - taps only determine phase offset
+            // (metronome BPM should already be set to trackBPM from autoMatchBPM)
+            
+            // Store beat offset for phase sync when restarting
             this.beatOffset = beatOffset;
-            metronome.smoothTransitionToPhase(beatOffset, trackBPM);
             
             // Update UI briefly
             const button = document.getElementById('tap-sync-toggle');
@@ -1937,7 +1940,7 @@ class BeatDetector {
                 button.style.background = '';
             }, 1500);
             
-            addDebugLog(`✅ Tap sync successful: phase offset=${beatOffset.toFixed(1)}ms, keeping track BPM=${trackBPM}`);
+            addDebugLog(`✅ Tap sync successful: keeping song BPM=${trackBPM.toFixed(3)}, phase offset=${beatOffset.toFixed(1)}ms`);
             return { success: true, beatInterval };
         } else {
             addDebugLog(`⚠️ Tap timing inconsistent (std dev: ${standardDeviation.toFixed(1)}ms)`);
