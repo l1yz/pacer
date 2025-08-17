@@ -826,7 +826,7 @@ function showResults(tracks) {
                 <div class="track-artist">${track.artists.map(a => a.name).join(', ')}</div>
                 <div class="track-duration">${formatDuration(track.duration_ms || 180000)}</div>
             </div>
-            <span class="track-bpm">${Math.round(track.tempo)} BPM</span>
+            <span class="track-bpm">${track.tempo.toFixed(3)} BPM</span>
         `;
         trackList.appendChild(trackElement);
     });
@@ -1150,7 +1150,7 @@ class AudioPlayer {
         
         document.getElementById('current-track-name').textContent = track.name;
         document.getElementById('current-track-artist').textContent = track.artists.map(a => a.name).join(', ');
-        document.getElementById('current-track-bpm').textContent = `${Math.round(track.tempo)} BPM`;
+        document.getElementById('current-track-bpm').textContent = `${track.tempo.toFixed(3)} BPM`;
         document.getElementById('current-track-index').textContent = this.currentIndex + 1;
         
         // Update remaining time
@@ -1228,14 +1228,12 @@ class AudioPlayer {
         // Check if track has BPM data
         if (this.currentTrack.tempo && this.currentTrack.tempo > 0) {
             const preciseBPM = this.currentTrack.tempo; // Keep precise decimal
-            const displayBPM = Math.round(preciseBPM); // Round for display only
-            
-            metronome.setBPM(preciseBPM, displayBPM); // Pass both values
+            metronome.setBPM(preciseBPM); // Use exact BPM
             addDebugLog(`🎵 Auto-matched metronome to song BPM: ${preciseBPM.toFixed(1)} (displayed as ${displayBPM})`);
             
             // Update UI to show matched BPM (rounded)
             if (document.getElementById('current-track-bpm')) {
-                document.getElementById('current-track-bpm').textContent = `${displayBPM} BPM`;
+                document.getElementById('current-track-bpm').textContent = `${preciseBPM.toFixed(3)} BPM`;
             }
         } else {
             // No BPM data available - use target BPM as fallback
@@ -1842,15 +1840,22 @@ class BeatDetector {
                     this.tapTimeoutId = null;
                 }
                 
-                // Auto-start metronome after successful sync
+                // Calculate when the next beat should occur
+                const timeSinceLastTap = Date.now() - this.tapTimes[this.tapTimes.length - 1];
+                const nextBeatDelay = Math.max(0, avgInterval - timeSinceLastTap);
+                
+                // Start metronome at the exact moment of the next beat
                 setTimeout(() => {
                     if (!metronome.isRunning) {
                         metronome.start();
-                        addDebugLog('🎵 Metronome auto-started after tap sync');
+                        addDebugLog('🎵 Metronome started at exact next beat timing');
                     }
-                    // Reset for next time
+                }, nextBeatDelay);
+                
+                // Reset tap sync after a brief delay
+                setTimeout(() => {
                     this.resetTapSync();
-                }, 1000);
+                }, 1500);
             } else {
                 // Failed - if we've hit max taps, reset and start fresh
                 if (this.tapTimes.length >= this.maxTapHistory) {
@@ -2081,6 +2086,18 @@ class Metronome {
             this.volume = e.target.value / 100;
         });
         
+        document.getElementById('song-volume').addEventListener('input', async (e) => {
+            const volume = e.target.value / 100;
+            if (spotifyPlayer) {
+                try {
+                    await spotifyPlayer.setVolume(volume);
+                    addDebugLog(`🔊 Song volume set to ${Math.round(volume * 100)}%`);
+                } catch (error) {
+                    addDebugLog(`Failed to set song volume: ${error.message}`);
+                }
+            }
+        });
+        
         document.getElementById('auto-sync-toggle').addEventListener('click', () => {
             this.toggleAutoSync();
         });
@@ -2138,10 +2155,9 @@ class Metronome {
     }
     
     
-    setBPM(bpm, displayBPM = null) {
+    setBPM(bpm) {
         this.bpm = bpm; // Use precise decimal for timing
-        const displayValue = displayBPM || Math.round(bpm); // Use provided display value or round
-        document.getElementById('metronome-bpm').textContent = `${displayValue} BPM`;
+        document.getElementById('metronome-bpm').textContent = `${bpm.toFixed(3)} BPM`;
         
         // Update visualization speed
         if (window.runnerViz) {
@@ -2219,7 +2235,7 @@ class Metronome {
         // Update BPM first if it changed
         if (Math.abs(this.bpm - bpm) > 0.001) {
             this.bpm = bpm;
-            document.getElementById('metronome-bpm').textContent = `${Math.round(bpm)} BPM`;
+            document.getElementById('metronome-bpm').textContent = `${bpm.toFixed(3)} BPM`;
         }
         
         if (!this.isRunning) {
