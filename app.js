@@ -1183,9 +1183,8 @@ class AudioPlayer {
         try {
             await spotifyPlayer.togglePlay();
             
-            if (this.isPlaying) {
-                metronome.start();
-            } else {
+            // Don't auto-start metronome - let user control it via tap sync
+            if (!this.isPlaying) {
                 metronome.stop();
             }
         } catch (error) {
@@ -1788,8 +1787,14 @@ class BeatDetector {
         
         // Check if this is a fresh start (after timeout or first tap)
         if (this.tapTimes.length === 0 || currentTime - this.lastTapTime > this.maxTapInterval) {
-            addDebugLog('🆕 Starting new tap sequence');
+            addDebugLog('🆕 Starting new tap sequence - silencing metronome');
             this.resetTapSync();
+            
+            // Silence the metronome while tapping
+            if (metronome.isRunning) {
+                metronome.stop();
+                addDebugLog('🔇 Metronome silenced for tap sync');
+            }
         }
         
         // Add current tap time
@@ -1808,8 +1813,13 @@ class BeatDetector {
         
         // Auto-reset after timeout if no more taps
         this.tapTimeoutId = setTimeout(() => {
-            addDebugLog('⏱️ Tap sequence timed out - resetting');
+            addDebugLog('⏱️ Tap sequence timed out - resetting and restarting metronome');
             this.resetTapSync();
+            // Restart metronome when tapping times out
+            if (!metronome.isRunning) {
+                metronome.start();
+                addDebugLog('🎵 Metronome restarted after tap timeout');
+            }
         }, this.maxTapInterval);
         
         addDebugLog(`👆 Tap ${this.tapTimes.length} recorded`);
@@ -1847,6 +1857,11 @@ class BeatDetector {
                     addDebugLog('📈 Max taps reached with inconsistent timing - resetting for fresh start');
                     setTimeout(() => {
                         this.resetTapSync();
+                        // Restart metronome with original timing
+                        if (!metronome.isRunning) {
+                            metronome.start();
+                            addDebugLog('🎵 Metronome restarted after failed tap sync');
+                        }
                     }, 1500); // Brief delay to show "Try again" message
                 }
             }
@@ -1912,7 +1927,7 @@ class BeatDetector {
                 button.style.background = '';
             }, 1500);
             
-            addDebugLog(`✅ Tap sync successful: phase offset=${beatOffset.toFixed(1)}ms, keeping track BPM=${trackBPM.toFixed(1)}`);
+            addDebugLog(`✅ Tap sync successful: phase offset=${beatOffset.toFixed(1)}ms, keeping track BPM=${trackBPM}`);
             return true;
         } else {
             addDebugLog(`⚠️ Tap timing inconsistent (std dev: ${standardDeviation.toFixed(1)}ms)`);
@@ -2033,6 +2048,8 @@ class Metronome {
         this.bpm = 120;
         this.isRunning = false;
         this.intervalId = null;
+        this.timeoutId = null;
+        this.nextBeatTime = 0;
         this.audioContext = null;
         this.volume = 0.5;
         this.phase = 0; // Current phase offset for smooth transitions
@@ -2169,42 +2186,66 @@ class Metronome {
     scheduleNextBeat() {
         if (!this.isRunning) return;
         
-        const interval = 60000 / this.bpm; // milliseconds per beat
+        // Use precise timing without setInterval rounding
+        const interval = 60000 / this.bpm; // precise milliseconds per beat
+        this.nextBeatTime = Date.now() + interval + this.phase;
+        this.phase = 0; // Reset phase after first beat
         
-        // Apply phase offset for sync (only if not the first beat)
-        if (this.phase !== 0) {
-            // Phase adjustment would go here for future enhancement
-            this.phase = 0; // Reset after first adjusted beat
-        }
+        this.scheduleExactBeat();
+    }
+    
+    scheduleExactBeat() {
+        if (!this.isRunning) return;
         
-        // Schedule regular intervals using setInterval for consistency
-        this.intervalId = setInterval(() => {
+        const now = Date.now();
+        const delay = Math.max(0, this.nextBeatTime - now);
+        
+        this.timeoutId = setTimeout(() => {
             if (this.isRunning) {
                 this.playBeat();
                 this.visualBeat();
+                
+                // Calculate next beat time precisely
+                const interval = 60000 / this.bpm;
+                this.nextBeatTime += interval;
+                
+                // Schedule next beat
+                this.scheduleExactBeat();
             }
-        }, interval);
+        }, delay);
     }
     
     smoothTransitionToPhase(beatOffset, bpm) {
+        // Update BPM first if it changed
+        if (Math.abs(this.bpm - bpm) > 0.001) {
+            this.bpm = bpm;
+            document.getElementById('metronome-bpm').textContent = `${Math.round(bpm)} BPM`;
+        }
+        
         if (!this.isRunning) {
             this.phase = beatOffset;
             return;
         }
         
-        // Calculate smooth transition
+        // Calculate smooth transition using precise timing
         const interval = 60000 / bpm;
-        const currentPhase = Date.now() % interval;
+        const now = Date.now();
+        const currentPhase = now % interval;
         const phaseDifference = (beatOffset - currentPhase + interval) % interval;
         
         // Avoid jarring transitions - only adjust if difference is significant
         if (Math.abs(phaseDifference) > 50 && Math.abs(phaseDifference) < interval - 50) {
             addDebugLog(`Smoothly adjusting metronome phase by ${phaseDifference.toFixed(1)}ms`);
             
-            // Restart with new phase
-            this.stop();
-            this.phase = phaseDifference;
-            this.start();
+            // Adjust next beat time precisely without stopping/starting
+            this.nextBeatTime = now + phaseDifference;
+            
+            // Clear current timeout and reschedule
+            if (this.timeoutId) {
+                clearTimeout(this.timeoutId);
+                this.timeoutId = null;
+            }
+            this.scheduleExactBeat();
         } else {
             addDebugLog('Phase difference too small for smooth transition - keeping current timing');
         }
@@ -2224,6 +2265,11 @@ class Metronome {
         if (this.intervalId) {
             clearInterval(this.intervalId);
             this.intervalId = null;
+        }
+        
+        if (this.timeoutId) {
+            clearTimeout(this.timeoutId);
+            this.timeoutId = null;
         }
     }
     
