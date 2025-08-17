@@ -26,29 +26,33 @@
             </div>
 
             <div class="controls">
-                <label>
-                    Target BPM: 
-                    <input type="number" id="target-bpm" value="120" min="60" max="200">
-                </label>
-                <label>
-                    Tolerance (±): 
-                    <input type="number" id="tolerance" value="5" min="1" max="20">
-                </label>
-                <label>
-                    Playlist Length (min): 
-                    <input type="number" id="playlist-duration" value="30" min="5" max="180">
-                </label>
-                <label>
-                    Songs to Analyze: 
-                    <input type="number" id="song-limit" value="100" min="10" max="1000">
-                </label>
-                <label>
-                    Playlist to Analyze:
-                    <select id="playlist-selector">
-                        <option value="liked">Liked Songs</option>
-                        <option value="loading" disabled>Loading playlists...</option>
-                    </select>
-                </label>
+                <div class="controls-row">
+                    <label>
+                        Target BPM: 
+                        <input type="number" id="target-bpm" value="120" min="60" max="200">
+                    </label>
+                    <label>
+                        Tolerance (±): 
+                        <input type="number" id="tolerance" value="5" min="1" max="20">
+                    </label>
+                    <label>
+                        Playlist Length (min): 
+                        <input type="number" id="playlist-duration" value="30" min="5" max="180">
+                    </label>
+                    <label>
+                        Songs to Analyze: 
+                        <input type="number" id="song-limit" value="100" min="10" max="1000">
+                    </label>
+                </div>
+                <div class="controls-row">
+                    <label>
+                        Playlist to Analyze:
+                        <select id="playlist-selector">
+                            <option value="liked">Liked Songs</option>
+                            <option value="loading" disabled>Loading playlists...</option>
+                        </select>
+                    </label>
+                </div>
             </div>
 
             <button id="analyze-button" class="btn-primary">
@@ -105,19 +109,20 @@
                     </div>
                 </div>
 
-                <div class="tempo-controls">
-                    <div class="tempo-option">
-                        <label>
-                            <input type="radio" name="tempo-mode" value="adjust-song" checked>
-                            Adjust songs to 120 BPM
-                        </label>
+
+                <div class="runner-visualization">
+                    <!-- Background layers (back to front) -->
+                    <div class="bg-layer mountains" data-speed="0.2"></div>
+                    <div class="bg-layer trees" data-speed="0.5"></div>
+                    <div class="bg-layer trail" data-speed="1.0"></div>
+                    
+                    <!-- Walking character (center, stationary) -->
+                    <div class="runner-character">
+                        <div class="runner-sprite">🏃</div>
                     </div>
-                    <div class="tempo-option">
-                        <label>
-                            <input type="radio" name="tempo-mode" value="adjust-metronome">
-                            Adjust metronome to song BPM
-                        </label>
-                    </div>
+                    
+                    <!-- Foreground elements -->
+                    <div class="bg-layer grass" data-speed="1.5"></div>
                 </div>
 
                 <div class="metronome-section">

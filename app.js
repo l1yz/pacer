@@ -1058,10 +1058,7 @@ class AudioPlayer {
         const button = document.getElementById('play-pause');
         button.textContent = this.isPlaying ? '⏸' : '▶';
         
-        // Update metronome based on current track (for manual mode changes)
-        if (this.currentTrack) {
-            this.updateTempoMode();
-        }
+        // Metronome BPM is already set via autoMatchBPM()
     }
     
     bindEvents() {
@@ -1079,13 +1076,6 @@ class AudioPlayer {
         
         document.getElementById('next-track').addEventListener('click', () => {
             this.nextTrack();
-        });
-        
-        // Tempo mode change
-        document.querySelectorAll('input[name="tempo-mode"]').forEach(radio => {
-            radio.addEventListener('change', () => {
-                this.updateTempoMode();
-            });
         });
     }
     
@@ -1162,8 +1152,7 @@ class AudioPlayer {
         const remainingMs = remainingTracks.reduce((total, track) => total + (track.duration_ms || 180000), 0);
         document.getElementById('remaining-time').textContent = formatDuration(remainingMs);
         
-        // Update metronome based on tempo mode
-        this.updateTempoMode();
+        // Metronome BPM is already set via autoMatchBPM()
     }
     
     updateProgressBar() {
@@ -1231,13 +1220,15 @@ class AudioPlayer {
         
         // Check if track has BPM data
         if (this.currentTrack.tempo && this.currentTrack.tempo > 0) {
-            const trackBPM = Math.round(this.currentTrack.tempo);
-            metronome.setBPM(trackBPM);
-            addDebugLog(`🎵 Auto-matched metronome to song BPM: ${trackBPM}`);
+            const preciseBPM = this.currentTrack.tempo; // Keep precise decimal
+            const displayBPM = Math.round(preciseBPM); // Round for display only
             
-            // Update UI to show matched BPM
+            metronome.setBPM(preciseBPM, displayBPM); // Pass both values
+            addDebugLog(`🎵 Auto-matched metronome to song BPM: ${preciseBPM.toFixed(1)} (displayed as ${displayBPM})`);
+            
+            // Update UI to show matched BPM (rounded)
             if (document.getElementById('current-track-bpm')) {
-                document.getElementById('current-track-bpm').textContent = `${trackBPM} BPM`;
+                document.getElementById('current-track-bpm').textContent = `${displayBPM} BPM`;
             }
         } else {
             // No BPM data available - use target BPM as fallback
@@ -1313,41 +1304,6 @@ class AudioPlayer {
         this.autoMatchBPM();
     }
     
-    updateTempoMode() {
-        const currentTrack = this.playlist[this.currentIndex] || this.currentTrack;
-        if (!currentTrack) return;
-        
-        const tempoMode = document.querySelector('input[name="tempo-mode"]:checked').value;
-        const targetBPM = parseInt(document.getElementById('target-bpm').value);
-        
-        if (tempoMode === 'adjust-song') {
-            // Option 1: Adjust song tempo to target BPM
-            const originalBPM = currentTrack.tempo;
-            if (originalBPM && originalBPM > 0) {
-                this.playbackRate = targetBPM / originalBPM;
-                
-                // NOTE: Spotify Web Playback SDK doesn't support tempo/pitch adjustment
-                // This shows the calculated playback rate that would be needed
-                addDebugLog(`Tempo calculation: ${originalBPM.toFixed(1)} → ${targetBPM} BPM (would need ${this.playbackRate.toFixed(2)}x rate)`);
-                addDebugLog(`Note: Spotify API doesn't support tempo adjustment. Use metronome for pacing.`);
-            } else {
-                addDebugLog(`⚠️ No BPM data available for tempo calculation`);
-            }
-            
-            metronome.setBPM(targetBPM);
-        } else {
-            // Option 2: Adjust metronome to song BPM (recommended)
-            this.playbackRate = 1.0;
-            if (currentTrack.tempo && currentTrack.tempo > 0) {
-                metronome.setBPM(Math.round(currentTrack.tempo));
-                addDebugLog(`Metronome set to match song: ${Math.round(currentTrack.tempo)} BPM`);
-            } else {
-                // Fallback to target BPM if no track BPM available
-                metronome.setBPM(targetBPM);
-                addDebugLog(`⚠️ No track BPM available - using target BPM: ${targetBPM}`);
-            }
-        }
-    }
 }
 
 // ============= Audio Beat Detection System =============
@@ -1947,6 +1903,69 @@ class BeatDetector {
     }
 }
 
+// ============= Runner Visualization Class =============
+class RunnerVisualization {
+    constructor() {
+        this.layers = document.querySelectorAll('.bg-layer');
+        this.runner = document.querySelector('.runner-sprite');
+        this.baseSpeed = 0; // pixels per frame
+        this.isRunning = false;
+        this.animationFrame = null;
+        this.layerPositions = new Map();
+        
+        // Initialize layer positions
+        this.layers.forEach(layer => {
+            this.layerPositions.set(layer, 0);
+        });
+    }
+    
+    setBPM(bpm) {
+        // Convert BPM to base scrolling speed
+        // Higher BPM = faster scrolling to create sense of speed
+        this.baseSpeed = (bpm / 60) * 30; // 30 pixels per second per BPM unit
+    }
+    
+    start() {
+        this.isRunning = true;
+        this.animate();
+    }
+    
+    stop() {
+        this.isRunning = false;
+        if (this.animationFrame) {
+            cancelAnimationFrame(this.animationFrame);
+        }
+    }
+    
+    animate() {
+        if (!this.isRunning) return;
+        
+        this.layers.forEach(layer => {
+            const speed = parseFloat(layer.dataset.speed) || 0.5;
+            const currentX = this.layerPositions.get(layer);
+            const newX = currentX - (this.baseSpeed * speed * 0.016); // 60fps
+            
+            // Reset position for seamless loop when layer scrolls past
+            const resetX = newX <= -layer.offsetWidth / 2 ? 0 : newX;
+            this.layerPositions.set(layer, resetX);
+            
+            layer.style.transform = `translateX(${resetX}px)`;
+        });
+        
+        this.animationFrame = requestAnimationFrame(() => this.animate());
+    }
+    
+    // Called on each metronome beat
+    onBeat() {
+        if (this.runner) {
+            this.runner.classList.add('step');
+            setTimeout(() => {
+                this.runner.classList.remove('step');
+            }, 150);
+        }
+    }
+}
+
 // Metronome class
 class Metronome {
     constructor() {
@@ -2041,9 +2060,15 @@ class Metronome {
     }
     
     
-    setBPM(bpm) {
-        this.bpm = bpm;
-        document.getElementById('metronome-bpm').textContent = `${bpm} BPM`;
+    setBPM(bpm, displayBPM = null) {
+        this.bpm = bpm; // Use precise decimal for timing
+        const displayValue = displayBPM || Math.round(bpm); // Use provided display value or round
+        document.getElementById('metronome-bpm').textContent = `${displayValue} BPM`;
+        
+        // Update visualization speed
+        if (window.runnerViz) {
+            window.runnerViz.setBPM(bpm);
+        }
         
         if (this.isRunning) {
             this.stop();
@@ -2066,6 +2091,11 @@ class Metronome {
         
         this.isRunning = true;
         document.getElementById('metronome-toggle').textContent = 'Stop Metronome';
+        
+        // Start visualization
+        if (window.runnerViz) {
+            window.runnerViz.start();
+        }
         
         // Play first beat immediately to eliminate start delay
         this.playBeat();
@@ -2126,6 +2156,11 @@ class Metronome {
         this.isRunning = false;
         document.getElementById('metronome-toggle').textContent = 'Start Metronome';
         
+        // Stop visualization
+        if (window.runnerViz) {
+            window.runnerViz.stop();
+        }
+        
         if (this.intervalId) {
             clearInterval(this.intervalId);
             this.intervalId = null;
@@ -2165,6 +2200,11 @@ class Metronome {
         const beatElement = document.getElementById('metronome-visual');
         beatElement.classList.add('active');
         
+        // Trigger runner step animation
+        if (window.runnerViz) {
+            window.runnerViz.onBeat();
+        }
+        
         setTimeout(() => {
             beatElement.classList.remove('active');
         }, 150);
@@ -2175,6 +2215,11 @@ class Metronome {
 const beatDetector = new BeatDetector();
 const audioPlayer = new AudioPlayer();
 const metronome = new Metronome();
+
+// Initialize runner visualization when DOM is ready
+document.addEventListener('DOMContentLoaded', () => {
+    window.runnerViz = new RunnerVisualization();
+});
 
 // ============= Initialize =============
 checkForToken();

@@ -85,10 +85,15 @@ h1 {
 }
 
 .controls {
-    display: flex;
-    gap: 20px;
-    justify-content: center;
     margin: 20px 0;
+}
+
+.controls-row {
+    display: flex;
+    gap: 15px;
+    justify-content: center;
+    margin: 10px 0;
+    flex-wrap: wrap;
 }
 
 .controls label {
@@ -444,4 +449,208 @@ h1 {
 #sync-text {
     font-size: 12px;
     opacity: 0.8;
+}
+
+/* ============= Runner Visualization Styles ============= */
+.runner-visualization {
+    width: 100%;
+    height: 200px;
+    position: relative;
+    overflow: hidden;
+    border-radius: 15px;
+    margin: 20px 0;
+    background: linear-gradient(to bottom, #87CEEB 0%, #98FB98 50%, #228B22 100%);
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.bg-layer {
+    position: absolute;
+    width: 200%; /* Double width for seamless scrolling */
+    height: 100%;
+    background-repeat: repeat-x;
+    background-size: auto 100%;
+    will-change: transform; /* Optimize for animations */
+}
+
+/* Mountains layer (background) */
+.mountains {
+    z-index: 1;
+    background: linear-gradient(to right, 
+        transparent 0%, 
+        #8B7D6B 10%, 
+        #696969 15%, 
+        #8B7D6B 20%, 
+        transparent 25%,
+        transparent 30%, 
+        #8B7D6B 35%, 
+        #696969 40%, 
+        #8B7D6B 45%, 
+        transparent 50%,
+        transparent 55%, 
+        #8B7D6B 60%, 
+        #696969 65%, 
+        #8B7D6B 70%, 
+        transparent 75%,
+        transparent 80%, 
+        #8B7D6B 85%, 
+        #696969 90%, 
+        #8B7D6B 95%, 
+        transparent 100%
+    );
+    top: 0;
+    height: 60%;
+}
+
+.mountains::before {
+    content: 'MOUNTAIN MOUNTAIN MOUNTAIN MOUNTAIN MOUNTAIN MOUNTAIN MOUNTAIN MOUNTAIN MOUNTAIN MOUNTAIN';
+    position: absolute;
+    top: 20%;
+    left: 0;
+    width: 100%;
+    text-align: center;
+    font-size: 12px;
+    color: rgba(255,255,255,0.7);
+    letter-spacing: 2px;
+    word-spacing: 50px;
+    white-space: nowrap;
+}
+
+/* Trees layer (middle) */
+.trees {
+    z-index: 2;
+    top: 40%;
+    height: 50%;
+    background: repeating-linear-gradient(to right,
+        transparent 0px,
+        transparent 15px,
+        #228B22 15px,
+        #228B22 25px,
+        transparent 25px,
+        transparent 40px,
+        #006400 40px,
+        #006400 50px,
+        transparent 50px,
+        transparent 65px
+    );
+}
+
+.trees::before {
+    content: '🌲 TREE 🌲 TREE 🌲 TREE 🌲 TREE 🌲 TREE 🌲 TREE 🌲 TREE 🌲 TREE 🌲 TREE 🌲 TREE 🌲 TREE 🌲 TREE';
+    position: absolute;
+    top: 50%;
+    left: 0;
+    width: 100%;
+    text-align: center;
+    font-size: 10px;
+    color: rgba(255,255,255,0.8);
+    letter-spacing: 1px;
+    word-spacing: 20px;
+    white-space: nowrap;
+    transform: translateY(-50%);
+}
+
+/* Trail layer (foreground) */
+.trail {
+    z-index: 3;
+    bottom: 0;
+    height: 30%;
+    background: repeating-linear-gradient(to right,
+        #8B4513 0px,
+        #CD853F 5px,
+        #8B4513 10px,
+        #CD853F 15px,
+        #8B4513 20px,
+        #CD853F 25px
+    );
+}
+
+.trail::before {
+    content: '= = = TRAIL = = = = = = TRAIL = = = = = = TRAIL = = = = = = TRAIL = = = = = = TRAIL = = =';
+    position: absolute;
+    top: 50%;
+    left: 0;
+    width: 100%;
+    text-align: center;
+    font-size: 8px;
+    color: rgba(255,255,255,0.6);
+    letter-spacing: 2px;
+    word-spacing: 30px;
+    white-space: nowrap;
+    transform: translateY(-50%);
+}
+
+/* Grass layer (very foreground) */
+.grass {
+    z-index: 5;
+    bottom: 0;
+    height: 20%;
+    background: repeating-linear-gradient(to right,
+        transparent 0px,
+        transparent 2px,
+        #32CD32 2px,
+        #32CD32 3px,
+        transparent 3px,
+        transparent 8px,
+        #228B22 8px,
+        #228B22 9px,
+        transparent 9px,
+        transparent 15px
+    );
+}
+
+.grass::before {
+    content: '🌿 GRASS 🌿 GRASS 🌿 GRASS 🌿 GRASS 🌿 GRASS 🌿 GRASS 🌿 GRASS 🌿 GRASS 🌿 GRASS';
+    position: absolute;
+    top: 30%;
+    left: 0;
+    width: 100%;
+    text-align: center;
+    font-size: 6px;
+    color: rgba(255,255,255,0.5);
+    letter-spacing: 1px;
+    word-spacing: 15px;
+    white-space: nowrap;
+}
+
+/* Walking character (center, stationary) */
+.runner-character {
+    position: absolute;
+    left: 50%;
+    bottom: 25%;
+    transform: translateX(-50%);
+    z-index: 4;
+    font-size: 40px;
+    animation: bobbing 0.6s ease-in-out infinite alternate;
+}
+
+.runner-sprite {
+    display: inline-block;
+    transition: transform 0.1s ease;
+}
+
+.runner-sprite.step {
+    transform: scale(1.2) translateY(-5px);
+}
+
+@keyframes bobbing {
+    0% { transform: translateX(-50%) translateY(0px); }
+    100% { transform: translateX(-50%) translateY(-3px); }
+}
+
+/* Add some clouds */
+.runner-visualization::before {
+    content: '☁️ ☁️ ☁️ ☁️ ☁️';
+    position: absolute;
+    top: 10%;
+    left: 0;
+    width: 100%;
+    text-align: center;
+    font-size: 20px;
+    z-index: 0;
+    animation: cloudDrift 20s linear infinite;
+}
+
+@keyframes cloudDrift {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
 }
