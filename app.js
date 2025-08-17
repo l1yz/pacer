@@ -1000,7 +1000,6 @@ class AudioPlayer {
         if (!state || !state.track_window.current_track) return;
         
         const track = state.track_window.current_track;
-        const wasPlaying = this.isPlaying;
         this.isPlaying = !state.paused;
         this.position = state.position;
         this.duration = state.duration;
@@ -1037,12 +1036,7 @@ class AudioPlayer {
             }
             
             // Reset tap sync for new track
-            beatDetector.tapTimes = [];
-            const tapButton = document.getElementById('tap-sync-toggle');
-            if (tapButton) {
-                tapButton.textContent = 'Tap to Sync';
-                tapButton.classList.remove('active');
-            }
+            beatDetector.resetTapSync();
             
             // Auto-calibrate beat sync if auto-sync is enabled and track is playing
             if (beatDetector.audioStream && this.isPlaying && !beatDetector.isListening) {
@@ -1111,11 +1105,23 @@ class AudioPlayer {
             await this.startPlayback(trackUris, 0);
             
             this.updatePlayerDisplay();
-            addDebugLog(`Started Spotify playlist: ${this.playlist.length} tracks`);
+            addDebugLog(`✅ Started Spotify playlist: ${this.playlist.length} tracks`);
+            
+            // Give Spotify time to start playing, then check status
+            setTimeout(() => {
+                if (!this.isPlaying) {
+                    addDebugLog('⚠️ Playlist started but not playing - this is normal, tracks should start shortly');
+                }
+            }, 2000);
             
         } catch (error) {
-            addDebugLog(`Error starting playlist: ${error.message}`);
-            alert('Failed to start playlist. Please try again.');
+            addDebugLog(`❌ Error starting playlist: ${error.message}`);
+            // Don't show alert if music is actually playing
+            if (!this.isPlaying) {
+                alert('Failed to start playlist. Please try again.');
+            } else {
+                addDebugLog('Playlist appears to be playing despite error - continuing...');
+            }
         }
     }
     
@@ -1152,7 +1158,9 @@ class AudioPlayer {
         const remainingMs = remainingTracks.reduce((total, track) => total + (track.duration_ms || 180000), 0);
         document.getElementById('remaining-time').textContent = formatDuration(remainingMs);
         
-        // Metronome BPM is already set via autoMatchBPM()
+        // Update metronome BPM to match current track
+        this.currentTrack = track;
+        this.autoMatchBPM();
     }
     
     updateProgressBar() {
@@ -1350,6 +1358,8 @@ class BeatDetector {
         this.maxTapInterval = 2000; // Max 2 seconds between taps
         this.isAutoTapMode = true; // Always ready for tap sync
         this.tapFeedbackAudio = null; // Audio context for tap feedback
+        this.lastTapTime = 0; // Track last tap for timeout
+        this.tapTimeoutId = null; // Timer to reset taps
     }
     
     async requestAudioAccess() {
@@ -1753,21 +1763,54 @@ class BeatDetector {
         }
     }
     
+    resetTapSync() {
+        this.tapTimes = [];
+        this.lastTapTime = 0;
+        
+        // Clear any existing timeout
+        if (this.tapTimeoutId) {
+            clearTimeout(this.tapTimeoutId);
+            this.tapTimeoutId = null;
+        }
+        
+        // Reset button
+        const button = document.getElementById('tap-sync-toggle');
+        if (button) {
+            button.textContent = 'Tap to Sync';
+            button.style.background = '';
+        }
+        
+        addDebugLog('🔄 Tap sync reset');
+    }
+
     handleTap() {
         const currentTime = Date.now();
         
+        // Check if this is a fresh start (after timeout or first tap)
+        if (this.tapTimes.length === 0 || currentTime - this.lastTapTime > this.maxTapInterval) {
+            addDebugLog('🆕 Starting new tap sequence');
+            this.resetTapSync();
+        }
+        
         // Add current tap time
         this.tapTimes.push(currentTime);
+        this.lastTapTime = currentTime;
         
         // Remove old taps beyond max history
         if (this.tapTimes.length > this.maxTapHistory) {
             this.tapTimes.shift();
         }
         
-        // Remove taps that are too old (beyond max interval from last tap)
-        this.tapTimes = this.tapTimes.filter(tapTime => 
-            currentTime - tapTime <= this.maxTapInterval * (this.maxTapHistory - 1)
-        );
+        // Clear any existing timeout and set new one
+        if (this.tapTimeoutId) {
+            clearTimeout(this.tapTimeoutId);
+        }
+        
+        // Auto-reset after timeout if no more taps
+        this.tapTimeoutId = setTimeout(() => {
+            addDebugLog('⏱️ Tap sequence timed out - resetting');
+            this.resetTapSync();
+        }, this.maxTapInterval);
         
         addDebugLog(`👆 Tap ${this.tapTimes.length} recorded`);
         
@@ -1783,16 +1826,29 @@ class BeatDetector {
         if (this.tapTimes.length >= this.minTapsRequired) {
             const success = this.calculateTapSync();
             if (success) {
+                // Clear timeout since we succeeded
+                if (this.tapTimeoutId) {
+                    clearTimeout(this.tapTimeoutId);
+                    this.tapTimeoutId = null;
+                }
+                
                 // Auto-start metronome after successful sync
                 setTimeout(() => {
                     if (!metronome.isRunning) {
                         metronome.start();
                         addDebugLog('🎵 Metronome auto-started after tap sync');
                     }
-                    // Reset tap counter
-                    this.tapTimes = [];
-                    button.textContent = 'Tap to Sync';
+                    // Reset for next time
+                    this.resetTapSync();
                 }, 1000);
+            } else {
+                // Failed - if we've hit max taps, reset and start fresh
+                if (this.tapTimes.length >= this.maxTapHistory) {
+                    addDebugLog('📈 Max taps reached with inconsistent timing - resetting for fresh start');
+                    setTimeout(() => {
+                        this.resetTapSync();
+                    }, 1500); // Brief delay to show "Try again" message
+                }
             }
         }
     }
@@ -1807,15 +1863,15 @@ class BeatDetector {
         }
         
         // Calculate median interval to avoid outliers
-        const sortedIntervals = intervals.sort((a, b) => a - b);
-        const medianInterval = sortedIntervals[Math.floor(sortedIntervals.length / 2)];
+        // const sortedIntervals = intervals.sort((a, b) => a - b);
+        // const medianInterval = sortedIntervals[Math.floor(sortedIntervals.length / 2)];
         
-        // Check if intervals are consistent (within 20% variance)
+        // Check if intervals are consistent (within 30% variance for more forgiveness)
         const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
         const variance = intervals.reduce((sum, interval) => 
             sum + Math.pow(interval - avgInterval, 2), 0) / intervals.length;
         const standardDeviation = Math.sqrt(variance);
-        const consistencyThreshold = avgInterval * 0.2; // 20% tolerance
+        const consistencyThreshold = avgInterval * 0.3; // 30% tolerance - more forgiving
         
         if (standardDeviation <= consistencyThreshold) {
             // Get the current track's BPM (don't change it!)
@@ -1864,7 +1920,6 @@ class BeatDetector {
         
         // If we reach here, sync failed - give feedback but continue listening
         const button = document.getElementById('tap-sync-toggle');
-        const originalText = button.textContent;
         button.textContent = 'Try again...';
         button.style.background = '#ff9800';
         
@@ -1891,6 +1946,12 @@ class BeatDetector {
         this.isListening = false;
         this.isTapSyncActive = false;
         this.tapTimes = [];
+        
+        // Clear tap timeout
+        if (this.tapTimeoutId) {
+            clearTimeout(this.tapTimeoutId);
+            this.tapTimeoutId = null;
+        }
         
         if (this.audioStream) {
             this.audioStream.getTracks().forEach(track => track.stop());
@@ -2109,11 +2170,10 @@ class Metronome {
         if (!this.isRunning) return;
         
         const interval = 60000 / this.bpm; // milliseconds per beat
-        let nextBeatDelay = interval;
         
         // Apply phase offset for sync (only if not the first beat)
         if (this.phase !== 0) {
-            nextBeatDelay = interval - this.phase;
+            // Phase adjustment would go here for future enhancement
             this.phase = 0; // Reset after first adjusted beat
         }
         
@@ -2217,9 +2277,21 @@ const audioPlayer = new AudioPlayer();
 const metronome = new Metronome();
 
 // Initialize runner visualization when DOM is ready
-document.addEventListener('DOMContentLoaded', () => {
-    window.runnerViz = new RunnerVisualization();
-});
+function initializeVisualization() {
+    if (document.querySelector('.runner-visualization')) {
+        window.runnerViz = new RunnerVisualization();
+        addDebugLog('Runner visualization initialized');
+    } else {
+        addDebugLog('⚠️ Runner visualization container not found');
+    }
+}
+
+// Try to initialize immediately, or wait for DOM
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initializeVisualization);
+} else {
+    initializeVisualization();
+}
 
 // ============= Initialize =============
 checkForToken();
